@@ -22,6 +22,41 @@ OAUTH_TOKEN_PATH = Path(__file__).parent / "google_oauth_token.json"
 CACHE_SCHEMA_VERSION = "2026-08-12-risk-percent-v2"
 
 
+def _authorized_user_credentials() -> dict | None:
+    """Return the deployed Google credential without exposing it to callers."""
+    if OAUTH_TOKEN_PATH.exists():
+        try:
+            return json.loads(OAUTH_TOKEN_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            pass
+    try:
+        return dict(st.secrets["google_authorized_user"])
+    except (KeyError, StreamlitSecretNotFoundError):
+        return None
+
+
+@st.cache_data(ttl="1m", max_entries=2, show_spinner=False)
+def load_allowed_emails(sheet_id: str, credentials: dict) -> set[str]:
+    """Read email/active rows from the first worksheet of the access list."""
+    import gspread
+    from google.oauth2.credentials import Credentials
+
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets.readonly",
+        "https://www.googleapis.com/auth/drive.readonly",
+    ]
+    client = gspread.authorize(Credentials.from_authorized_user_info(credentials, scopes=scopes))
+    rows = client.open_by_key(sheet_id).sheet1.get_all_values()
+    allowed: set[str] = set()
+    disabled_values = {"n", "no", "false", "0", "중지", "비활성", "해제"}
+    for row in rows[1:]:
+        email = row[0].strip().lower() if row else ""
+        active = row[1].strip().lower() if len(row) > 1 else "y"
+        if email and "@" in email and active not in disabled_values:
+            allowed.add(email)
+    return allowed
+
+
 @st.cache_data(ttl="10m", max_entries=3, show_spinner="교육생 현황을 불러오는 중입니다...")
 def load_participants(path: str, modified_at: float, schema_version: str) -> pd.DataFrame:
     del modified_at, schema_version
@@ -294,9 +329,11 @@ def require_access() -> None:
             for email in st.secrets.get("ALLOWED_EMAILS", [])
             if str(email).strip()
         }
+        access_sheet_id = str(st.secrets.get("ACCESS_SHEET_ID", "")).strip()
     except StreamlitSecretNotFoundError:
         auth_configured = False
         allowed_emails = set()
+        access_sheet_id = ""
 
     if auth_configured:
         if not getattr(st.user, "is_logged_in", False):
@@ -308,6 +345,16 @@ def require_access() -> None:
 
         email = str(st.user.get("email", "")).strip().lower()
         email_verified = bool(st.user.get("email_verified", False))
+        if access_sheet_id:
+            credentials = _authorized_user_credentials()
+            if credentials is None:
+                st.error("접근 권한 목록 연결 정보를 찾지 못했습니다.", icon=":material/cloud_off:")
+                st.stop()
+            try:
+                allowed_emails.update(load_allowed_emails(access_sheet_id, credentials))
+            except Exception:
+                st.error("접근 권한 목록을 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.", icon=":material/cloud_off:")
+                st.stop()
         if not email_verified or email not in allowed_emails:
             st.error("이 계정은 대시보드 접근 권한이 없습니다.", icon=":material/block:")
             st.caption(f"현재 로그인 계정: {email or '확인 불가'}")
