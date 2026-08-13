@@ -90,7 +90,7 @@ def _parse_sheet_date(value):
     if not value:
         return None
     parsed = pd.to_datetime(str(value).strip(), errors="coerce")
-    if pd.isna(parsed):
+    if pd.isna(parsed) or parsed.year < 2000:
         match = re.fullmatch(r"(\d{1,2})/(\d{1,2})", str(value).strip())
         if match:
             parsed = pd.Timestamp(datetime.now().year, int(match.group(1)), int(match.group(2)))
@@ -240,7 +240,6 @@ def summarize_attendance(frame: pd.DataFrame, period_column: str) -> pd.DataFram
 
 def add_early_warning(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame.copy()
-    expected_days = int(result["출석일수"].max())
     scores: list[int] = []
     levels: list[str] = []
     reasons: list[str] = []
@@ -249,7 +248,6 @@ def add_early_warning(frame: pd.DataFrame) -> pd.DataFrame:
 
     for _, row in result.iterrows():
         rate = float(row["출석률"]) if pd.notna(row["출석률"]) else 0.0
-        days = float(row["출석일수"]) if pd.notna(row["출석일수"]) else 0.0
         events = int(row["지각·조퇴·외출"])
         converted_absence, event_remainder = divmod(events, 3)
         score = 0
@@ -268,20 +266,9 @@ def add_early_warning(frame: pd.DataFrame) -> pd.DataFrame:
             score += 10
             causes.append("출석률 95% 미만")
 
-        day_gap = max(expected_days - days, 0)
-        if day_gap >= 4:
-            score += 20
-            causes.append(f"정상 대비 출석 {int(day_gap)}일 부족")
-        elif day_gap >= 2:
-            score += 10
-            causes.append(f"정상 대비 출석 {int(day_gap)}일 부족")
-
         if converted_absence:
             score += min(converted_absence * 20, 40)
             causes.append(f"지각·조퇴·외출 {events}회 → 결석 {converted_absence}회 환산")
-        elif event_remainder:
-            score += 5 * event_remainder
-            causes.append(f"지각·조퇴·외출 누적 {event_remainder}/3회")
 
         score = min(score, 100)
         if score >= 60:
