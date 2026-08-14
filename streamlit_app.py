@@ -476,89 +476,7 @@ with overview:
         latest_status = (
             latest["상태"]
             .value_counts()
-            .reindex(["출석", "인정출석", "결석", "지각", "조퇴", "외출"], fill_value=0)
-            .rename_axis("상태")
-            .reset_index(name="인원")
-        )
-        latest_events = int(latest["상태"].isin(["지각", "조퇴", "외출"]).sum())
-        latest_absences = int((latest["상태"] == "결석").sum())
-        latest_present = int(latest["상태"].isin(["출석", "인정출석", "지각", "조퇴", "외출"]).sum())
-        latest_rate = latest_present / max(len(latest), 1)
-
-        with st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
-            with st.container(gap=None):
-                st.subheader("오늘의 운영 요약")
-                st.caption(
-                    f"최근 집계일 {latest_date:%Y-%m-%d} · {coverage_note} · "
-                    f"{len(latest):,}/{expected_people:,}명 입력"
-                )
-            st.badge(
-                f"입력률 {latest_coverage:.0%}",
-                color="green" if latest_coverage >= 0.8 else "orange",
-                icon=":material/fact_check:",
-            )
-
-        with st.container(horizontal=True, horizontal_alignment="distribute"):
-            st.metric("당일 출석률", f"{latest_rate:.1%}", border=True)
-            st.metric("결석", f"{latest_absences:,}명", border=True)
-            st.metric("지각·조퇴·외출", f"{latest_events:,}명", border=True)
-            st.metric("확인 필요", f"{latest_absences + latest_events:,}명", border=True)
-
-        status_chart = (
-            alt.Chart(latest_status[latest_status["인원"] > 0])
-            .mark_arc(innerRadius=55, outerRadius=90)
-            .encode(
-                theta=alt.Theta("인원:Q"),
-                color=alt.Color(
-                    "상태:N",
-                    scale=alt.Scale(
-                        domain=["출석", "인정출석", "결석", "지각", "조퇴", "외출"],
-                        range=["#1967D2", "#188038", "#B3261E", "#E37400", "#F9AB00", "#9334E6"],
-                    ),
-                    legend=alt.Legend(title=None, orient="bottom", columns=3),
-                ),
-                tooltip=["상태", alt.Tooltip("인원:Q", format="d")],
-            )
-            .properties(height=250)
-        )
-
-        class_daily = latest.assign(
-            출석인정=latest["상태"].isin(["출석", "인정출석", "지각", "조퇴", "외출"]).astype(int),
-            확인필요=latest["상태"].isin(["결석", "지각", "조퇴", "외출"]).astype(int),
-        )
-        class_daily = (
-            class_daily.groupby(["반번호", "반", "권역", "과정"], as_index=False)
-            .agg(교육생=("이름", "count"), 출석인원=("출석인정", "sum"), 확인필요=("확인필요", "sum"))
-            .assign(출석률=lambda x: x["출석인원"] / x["교육생"])
-            .sort_values(["출석률", "확인필요", "반번호"], ascending=[True, False, True])
-        )
-        class_chart = (
-            alt.Chart(class_daily)
-            .mark_bar(cornerRadiusEnd=4)
-            .encode(
-                y=alt.Y("반:N", sort=alt.SortField("출석률", order="ascending"), title=None),
-                x=alt.X("출석률:Q", title=None, scale=alt.Scale(domain=[0, 1]), axis=alt.Axis(format="%")),
-                color=alt.condition("datum.출석률 < 0.9", alt.value("#B3261E"), alt.value("#1967D2")),
-                tooltip=["반", "권역", alt.Tooltip("출석률:Q", format=".1%"), "확인필요"],
-            )
-            .properties(height=250)
-        )
-
-        chart_left, chart_right = st.columns([0.8, 1.7], gap="medium")
-        with chart_left:
-            with st.container(border=True, height="stretch"):
-                st.markdown("**최근 출결 구성**")
-                st.altair_chart(status_chart)
-        with chart_right:
-            with st.container(border=True, height="stretch"):
-                st.markdown("**반별 당일 출석률**")
-                st.altair_chart(class_chart)
-
-        attention = latest[latest["상태"].isin(["결석", "지각", "조퇴", "외출"])][
-            ["반", "권역", "과정", "이름", "상태"]
-        ].sort_values(["상태", "반", "이름"])
-        with st.container(border=True):
-            with st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
+            .reindex(["출석", "인정출석", "결석", "지…1648 tokens truncated…t.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
                 st.markdown("**당일 확인 명단**")
                 st.badge(f"{len(attention)}명", color="red" if len(attention) else "green")
             if attention.empty:
@@ -952,3 +870,4 @@ with period_view:
                 height=420,
                 key="daily_attendance_detail",
             )
+
