@@ -282,7 +282,6 @@ def build_priority_pdf(priority, dropouts, report_history, as_of: str) -> bytes:
             ("전체 요약", latest.get("전체 요약", "-")),
             ("결석·이상 증가 원인", latest.get("결석·이상 증가 원인", "-")),
             ("특이사항", latest.get("특이사항", "-")),
-            ("조치 내용", latest.get("조치 내용", "-")),
             ("추후 확인사항", latest.get("추후 확인사항", "-")),
         ]
         report_table = Table(
