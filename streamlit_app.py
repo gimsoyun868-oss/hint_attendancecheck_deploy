@@ -473,6 +473,8 @@ with overview:
             coverage_note = "입력 건수가 가장 많은 날짜"
         latest = overview_daily[overview_daily["날짜"] == latest_date].copy()
         latest_coverage = len(latest) / expected_people
+        displayed_coverage = min(latest_coverage, 1.0)
+        excess_records = max(len(latest) - expected_people, 0)
         latest_status = (
             latest["상태"]
             .value_counts()
@@ -490,13 +492,20 @@ with overview:
                 st.subheader("오늘의 운영 요약")
                 st.caption(
                     f"최근 집계일 {latest_date:%Y-%m-%d} · {coverage_note} · "
-                    f"{len(latest):,}/{expected_people:,}명 입력"
+                    f"기준 {expected_people:,}명 · 입력 {len(latest):,}건"
                 )
-            st.badge(
-                f"입력률 {latest_coverage:.0%}",
-                color="green" if latest_coverage >= 0.8 else "orange",
-                icon=":material/fact_check:",
-            )
+            with st.container(horizontal=True, vertical_alignment="center", gap="small"):
+                st.badge(
+                    f"입력률 {displayed_coverage:.0%}",
+                    color="green" if latest_coverage >= 0.8 else "orange",
+                    icon=":material/fact_check:",
+                )
+                if excess_records:
+                    st.badge(
+                        f"신규·중복 확인 {excess_records:,}명",
+                        color="orange",
+                        icon=":material/person_search:",
+                    )
 
         with st.container(horizontal=True, horizontal_alignment="distribute"):
             st.metric("당일 출석률", f"{latest_rate:.1%}", border=True)
