@@ -489,7 +489,374 @@ with st.container(horizontal=True, horizontal_alignment="distribute"):
         chart_data=filtered.groupby("반").size().tolist(),
         chart_type="bar",
     )
-    st.metric("평균 출석률", f"{filtered['출석률'].clip(upper=1).mean():.1%}" if len(fil…4407 tokens truncated…ected_overview = summary.iloc[0]
+    st.metric("평균 출석률", f"{filtered['출석률'].clip(upper=1).mean():.1%}" if len(filtered) else "-", border=True)
+    st.metric("고위험", f"{(filtered['위험등급'] == '고위험').sum():,}명", border=True)
+    st.metric("주의·관찰", f"{filtered['위험등급'].isin(['주의', '관찰']).sum():,}명", border=True)
+
+overview, warning, manager_view, people, classes_view, period_view = st.tabs(
+    ["운영 요약", "이탈 조기경보", "우선관리·리포트", "전체 교육생", "반별 현황", "기간별 출결"],
+    default="운영 요약",
+)
+
+with overview:
+    overview_daily = daily_df.copy()
+    if query:
+        overview_daily = overview_daily[
+            overview_daily["이름"].str.contains(query.strip(), case=False, na=False)
+        ]
+    if regions:
+        overview_daily = overview_daily[overview_daily["권역"].isin(regions)]
+    if classes:
+        overview_daily = overview_daily[overview_daily["반"].isin(classes)]
+
+    if overview_daily.empty:
+        st.info("현재 필터에 해당하는 출결 기록이 없습니다.", icon=":material/filter_alt_off:")
+    else:
+        expected_people = max(overview_daily["이름"].nunique(), 1)
+        daily_coverage = overview_daily.groupby("날짜")["이름"].nunique().sort_index()
+        minimum_complete = max(1, int(expected_people * 0.8))
+        completed_dates = daily_coverage[daily_coverage >= minimum_complete]
+        if not completed_dates.empty:
+            latest_date = completed_dates.index.max()
+            coverage_note = "입력 완료 기준 80% 이상"
+        else:
+            latest_date = daily_coverage.idxmax()
+            coverage_note = "입력 건수가 가장 많은 날짜"
+        latest = overview_daily[overview_daily["날짜"] == latest_date].copy()
+        latest_coverage = len(latest) / expected_people
+        displayed_coverage = min(latest_coverage, 1.0)
+        excess_records = max(len(latest) - expected_people, 0)
+        latest_status = (
+            latest["상태"]
+            .value_counts()
+            .reindex(["출석", "인정출석", "결석", "지각", "조퇴", "외출"], fill_value=0)
+            .rename_axis("상태")
+            .reset_index(name="인원")
+        )
+        latest_events = int(latest["상태"].isin(["지각", "조퇴", "외출"]).sum())
+        latest_absences = int((latest["상태"] == "결석").sum())
+        latest_present = int(latest["상태"].isin(["출석", "인정출석", "지각", "조퇴", "외출"]).sum())
+        latest_rate = latest_present / max(len(latest), 1)
+
+        with st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
+            with st.container(gap=None):
+                st.subheader("오늘의 운영 요약")
+                st.caption(
+                    f"최근 집계일 {latest_date:%Y-%m-%d} · {coverage_note} · "
+                    f"기준 {expected_people:,}명 · 입력 {len(latest):,}건"
+                )
+            with st.container(horizontal=True, vertical_alignment="center", gap="small"):
+                st.badge(
+                    f"입력률 {displayed_coverage:.0%}",
+                    color="green" if latest_coverage >= 0.8 else "orange",
+                    icon=":material/fact_check:",
+                )
+                if excess_records:
+                    st.badge(
+                        f"신규·중복 확인 {excess_records:,}명",
+                        color="orange",
+                        icon=":material/person_search:",
+                    )
+
+        with st.container(horizontal=True, horizontal_alignment="distribute"):
+            st.metric("당일 출석률", f"{latest_rate:.1%}", border=True)
+            st.metric("결석", f"{latest_absences:,}명", border=True)
+            st.metric("지각·조퇴·외출", f"{latest_events:,}명", border=True)
+            st.metric("확인 필요", f"{latest_absences + latest_events:,}명", border=True)
+
+        status_chart = (
+            alt.Chart(latest_status[latest_status["인원"] > 0])
+            .mark_arc(innerRadius=55, outerRadius=90)
+            .encode(
+                theta=alt.Theta("인원:Q"),
+                color=alt.Color(
+                    "상태:N",
+                    scale=alt.Scale(
+                        domain=["출석", "인정출석", "결석", "지각", "조퇴", "외출"],
+                        range=["#1967D2", "#188038", "#B3261E", "#E37400", "#F9AB00", "#9334E6"],
+                    ),
+                    legend=alt.Legend(title=None, orient="bottom", columns=3),
+                ),
+                tooltip=["상태", alt.Tooltip("인원:Q", format="d")],
+            )
+            .properties(height=250)
+        )
+
+        class_daily = latest.assign(
+            출석인정=latest["상태"].isin(["출석", "인정출석", "지각", "조퇴", "외출"]).astype(int),
+            확인필요=latest["상태"].isin(["결석", "지각", "조퇴", "외출"]).astype(int),
+        )
+        class_daily = (
+            class_daily.groupby(["반번호", "반", "권역", "과정"], as_index=False)
+            .agg(교육생=("이름", "count"), 출석인원=("출석인정", "sum"), 확인필요=("확인필요", "sum"))
+            .assign(출석률=lambda x: x["출석인원"] / x["교육생"])
+            .assign(
+                출석구간=lambda x: pd.cut(
+                    x["출석률"],
+                    bins=[-float("inf"), 0.9, 0.95, float("inf")],
+                    labels=["90% 미만", "90~95%", "95% 이상"],
+                    right=False,
+                )
+            )
+            .sort_values("반번호")
+        )
+        class_order = class_daily["반"].tolist()
+        class_chart_height = max(360, len(class_daily) * 29)
+        class_bars = (
+            alt.Chart(class_daily)
+            .mark_bar(cornerRadiusEnd=5, size=18)
+            .encode(
+                y=alt.Y(
+                    "반:N",
+                    sort=class_order,
+                    title=None,
+                    axis=alt.Axis(labelLimit=90, labelPadding=8, labelOverlap=False),
+                ),
+                x=alt.X(
+                    "출석률:Q",
+                    title=None,
+                    scale=alt.Scale(domain=[0, 1.08]),
+                    axis=alt.Axis(format="%", values=[0, 0.25, 0.5, 0.75, 1]),
+                ),
+                color=alt.Color(
+                    "출석구간:N",
+                    scale=alt.Scale(
+                        domain=["90% 미만", "90~95%", "95% 이상"],
+                        range=["#B3261E", "#E37400", "#1967D2"],
+                    ),
+                    legend=None,
+                ),
+                tooltip=[
+                    "반",
+                    "권역",
+                    "과정",
+                    alt.Tooltip("교육생:Q", format="d"),
+                    alt.Tooltip("출석률:Q", format=".1%"),
+                    alt.Tooltip("확인필요:Q", title="확인 필요", format="d"),
+                ],
+            )
+        )
+        class_labels = (
+            alt.Chart(class_daily)
+            .mark_text(align="left", baseline="middle", dx=6, fontSize=12, fontWeight="bold", color="#3C4043")
+            .encode(
+                y=alt.Y("반:N", sort=class_order),
+                x=alt.X("출석률:Q"),
+                text=alt.Text("출석률:Q", format=".1%"),
+            )
+        )
+        class_chart = (class_bars + class_labels).properties(height=class_chart_height)
+
+        chart_left, chart_right = st.columns([0.8, 1.7], gap="medium")
+        with chart_left:
+            with st.container(border=True, height="stretch"):
+                st.markdown("**최근 출결 구성**")
+                st.altair_chart(status_chart)
+        with chart_right:
+            with st.container(border=True, height="stretch"):
+                st.markdown("**반별 당일 출석률**")
+                st.caption("반 번호 순으로 전체 17개 반을 표시합니다. 빨강은 90% 미만, 주황은 95% 미만입니다.")
+                class_chart_tab, class_table_tab = st.tabs(["출석률 그래프", "반별 요약표"])
+                with class_chart_tab:
+                    st.altair_chart(class_chart)
+                with class_table_tab:
+                    st.dataframe(
+                        class_daily[["반", "권역", "과정", "교육생", "출석률", "확인필요"]],
+                        hide_index=True,
+                        column_config={
+                            "반": st.column_config.TextColumn("반", pinned=True),
+                            "교육생": st.column_config.NumberColumn("교육생", format="%d명"),
+                            "출석률": st.column_config.ProgressColumn(
+                                "당일 출석률", format="percent", min_value=0, max_value=1
+                            ),
+                            "확인필요": st.column_config.NumberColumn("확인 필요", format="%d명"),
+                        },
+                        height=min(610, 38 + len(class_daily) * 35),
+                        key="latest_class_summary_table",
+                    )
+
+        attention = latest[latest["상태"].isin(["결석", "지각", "조퇴", "외출"])][
+            ["반", "권역", "과정", "이름", "상태"]
+        ].sort_values(["상태", "반", "이름"])
+        with st.container(border=True):
+            with st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
+                st.markdown("**당일 확인 명단**")
+                st.badge(f"{len(attention)}명", color="red" if len(attention) else "green")
+            if attention.empty:
+                st.caption("결석·지각·조퇴·외출 기록이 없습니다.")
+            else:
+                st.dataframe(
+                    attention,
+                    hide_index=True,
+                    column_config={
+                        "반": st.column_config.TextColumn("반", pinned=True),
+                        "이름": st.column_config.TextColumn("이름", pinned=True),
+                    },
+                    height=min(340, 38 + len(attention) * 35),
+                    key="latest_attention_table",
+                )
+
+with warning:
+    st.caption(
+        ":material/info: 출결 신호를 이용한 규칙 기반 조기경보입니다. 실제 중도탈락 확률이 아니며 담당자의 확인을 돕는 우선순위 지표입니다."
+    )
+    risk_df = filtered[filtered["위험등급"] != "정상"].sort_values(
+        ["위험점수", "출석률"], ascending=[False, True]
+    )
+    risk_counts = (
+        df["위험등급"]
+        .value_counts()
+        .reindex(["고위험", "주의", "관찰", "정상"], fill_value=0)
+        .rename_axis("위험등급")
+        .reset_index(name="인원")
+    )
+    chart = (
+        alt.Chart(risk_counts)
+        .mark_bar(cornerRadiusEnd=4)
+        .encode(
+            y=alt.Y("위험등급:N", sort=["고위험", "주의", "관찰", "정상"], title=None),
+            x=alt.X("인원:Q", title="교육생 수"),
+            color=alt.Color(
+                "위험등급:N",
+                scale=alt.Scale(
+                    domain=["고위험", "주의", "관찰", "정상"],
+                    range=["#B3261E", "#F29900", "#F9AB00", "#188038"],
+                ),
+                legend=None,
+            ),
+            tooltip=["위험등급", "인원"],
+        )
+        .properties(height=210)
+    )
+    chart_col, priority_col = st.columns([1.05, 1.95], gap="large")
+    with chart_col:
+        with st.container(border=True, height="stretch"):
+            st.subheader("위험등급 분포", help="전체 500명의 현재 조기경보 등급입니다.")
+            st.altair_chart(chart)
+            with st.container(horizontal=True, horizontal_alignment="distribute"):
+                st.badge(f"고위험 {int((df['위험등급'] == '고위험').sum())}명", color="red")
+                st.badge(f"주의 {int((df['위험등급'] == '주의').sum())}명", color="orange")
+                st.badge(f"관찰 {int((df['위험등급'] == '관찰').sum())}명", color="yellow")
+    with priority_col:
+        with st.container(border=True, height="stretch"):
+            st.subheader("오늘 먼저 확인할 교육생")
+            top_risk = risk_df.head(8)[["반", "이름", "위험등급", "주요 원인"]]
+            st.dataframe(
+                top_risk,
+                hide_index=True,
+                column_config={
+                    "반": st.column_config.TextColumn("반", pinned=True, width="small"),
+                    "이름": st.column_config.TextColumn("이름", pinned=True, width="small"),
+                },
+                height=286,
+                key="top_priority_table",
+            )
+            st.caption("출결 기반 상대 위험도가 높은 순서입니다. 현재 값은 실제 이탈확률이 아닙니다.")
+    st.space("small")
+    st.subheader(f"우선 확인 대상 {len(risk_df):,}명")
+    st.dataframe(
+        risk_df[["반", "권역", "과정", "이름", "출석률", "출석일수", "지각·조퇴·외출", "환산결석", "환산잔여횟수", "위험등급", "주요 원인"]],
+        hide_index=True,
+        column_config={
+            "반": st.column_config.TextColumn("반", pinned=True),
+            "이름": st.column_config.TextColumn("이름", pinned=True),
+            "출석률": st.column_config.ProgressColumn("출석률", format="percent", min_value=0, max_value=1.1),
+            "출석일수": st.column_config.NumberColumn("출석일수", format="%d일"),
+            "지각·조퇴·외출": st.column_config.NumberColumn("지각·조퇴·외출", format="%d회"),
+            "환산결석": st.column_config.NumberColumn("환산 결석", format="%d회"),
+            "환산잔여횟수": st.column_config.NumberColumn("다음 환산까지", format="%d/3회"),
+        },
+        height=520,
+        key="early_warning_table",
+    )
+
+with people:
+    display = filtered.sort_values(["위험점수", "출석률"], ascending=[False, True]).drop(
+        columns=["반번호", "위험점수", "이탈위험도"]
+    )
+    event = st.dataframe(
+        display,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        column_config={
+            "반": st.column_config.TextColumn("반", pinned=True),
+            "이름": st.column_config.TextColumn("이름", pinned=True),
+            "출석률": st.column_config.ProgressColumn("출석률", format="percent", min_value=0, max_value=1.1),
+        },
+        height=610,
+        key="participant_table",
+    )
+    if event.selection.rows:
+        selected = display.iloc[event.selection.rows[0]]
+        st.info(
+            f"{selected['이름']} · {selected['반']} · {selected['위험등급']} · {selected['주요 원인']}",
+            icon=":material/person:",
+        )
+    st.download_button(
+        "현재 목록 Excel 다운로드",
+        data=to_excel_bytes(display),
+        file_name="교육생_통합현황.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        icon=":material/download:",
+    )
+
+with classes_view:
+    summary = (
+        filtered.groupby(["반번호", "반", "권역", "과정"], as_index=False)
+        .agg(
+            교육생=("이름", "count"),
+            평균출석률=("출석률", lambda s: s.clip(upper=1).mean()),
+            고위험=("위험등급", lambda s: int((s == "고위험").sum())),
+            주의=("위험등급", lambda s: int((s == "주의").sum())),
+            관찰=("위험등급", lambda s: int((s == "관찰").sum())),
+        )
+        .sort_values("반번호")
+    )
+    chart_data = summary[["반번호", "반", "고위험", "주의", "관찰"]].melt(
+        id_vars=["반번호", "반"],
+        value_vars=["고위험", "주의", "관찰"],
+        var_name="위험등급",
+        value_name="인원",
+    )
+    class_order = summary["반"].tolist()
+    stacked_bars = (
+        alt.Chart(chart_data)
+        .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
+        .encode(
+            x=alt.X("반:N", sort=class_order, title=None, axis=alt.Axis(labelAngle=0)),
+            y=alt.Y("sum(인원):Q", title="우선 확인 인원", axis=alt.Axis(tickMinStep=1)),
+            color=alt.Color(
+                "위험등급:N",
+                sort=["고위험", "주의", "관찰"],
+                scale=alt.Scale(
+                    domain=["고위험", "주의", "관찰"],
+                    range=["#B3261E", "#E37400", "#F9AB00"],
+                ),
+                legend=alt.Legend(title=None, orient="top"),
+            ),
+            order=alt.Order("위험등급:N", sort="ascending"),
+            tooltip=["반", "위험등급", alt.Tooltip("인원:Q", format="d")],
+        )
+    )
+    segment_labels = (
+        alt.Chart(chart_data[chart_data["인원"] > 0])
+        .mark_text(color="white", fontSize=12, fontWeight="bold")
+        .encode(
+            x=alt.X("반:N", sort=class_order),
+            y=alt.Y("sum(인원):Q", stack="center"),
+            detail="위험등급:N",
+            order=alt.Order("위험등급:N", sort="ascending"),
+            text=alt.Text("인원:Q", format="d"),
+        )
+    )
+    if len(summary) > 1:
+        with st.container(border=True):
+            st.subheader("반별 위험 신호 비교")
+            st.caption("여러 반의 고위험·주의·관찰 인원을 비교합니다.")
+            st.altair_chart((stacked_bars + segment_labels).properties(height=250))
+    elif len(summary) == 1:
+        selected_overview = summary.iloc[0]
         with st.container(border=True):
             with st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
                 with st.container(gap=None):
@@ -874,4 +1241,3 @@ with period_view:
                 height=420,
                 key="daily_attendance_detail",
             )
-
