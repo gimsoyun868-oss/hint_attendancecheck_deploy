@@ -13,7 +13,7 @@ from streamlit.errors import StreamlitSecretNotFoundError
 from pdf_report import build_priority_pdf
 
 st.set_page_config(
-    page_title="K-뉴딜 아카데미 통합 현황",
+    page_title="K-뉴딜아카데미 출결 현황",
     page_icon=":material/groups:",
     layout="wide",
 )
@@ -433,7 +433,7 @@ def require_access() -> None:
 
     if auth_configured:
         if not getattr(st.user, "is_logged_in", False):
-            st.title("K-뉴딜 아카데미 통합 현황")
+            st.title("K-뉴딜아카데미 출결 현황")
             st.caption("허용된 회사 Google 계정으로 로그인해야 이용할 수 있습니다.")
             if st.button("Google 계정으로 로그인", type="primary", icon=":material/login:"):
                 st.login()
@@ -479,7 +479,7 @@ def require_access() -> None:
     if st.session_state.get("authenticated"):
         st.session_state["current_user_email"] = "local-admin"
         return
-    st.title("K-뉴딜 아카데미 통합 현황")
+    st.title("K-뉴딜아카데미 출결 현황")
     entered = st.text_input("접근 비밀번호", type="password")
     if st.button("로그인", type="primary", icon=":material/login:"):
         if entered == password:
@@ -494,7 +494,7 @@ require_access()
 with st.container(border=True):
     with st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
         with st.container(gap=None):
-            st.title("K-뉴딜 아카데미 통합 현황")
+            st.title("K-뉴딜아카데미 출결 현황")
             st.caption("17개 반 500명의 출결과 이탈 위험 신호를 한 화면에서 확인합니다.")
         with st.container(horizontal=True, vertical_alignment="center"):
             st.badge("500명 통합", color="blue", icon=":material/groups:")
