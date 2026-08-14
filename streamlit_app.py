@@ -1,6 +1,7 @@
 from io import BytesIO
 from pathlib import Path
-from datetime import datetime
+from datetime import date, datetime
+from math import ceil
 import json
 import re
 
@@ -18,8 +19,19 @@ st.set_page_config(
 DATA_PATH = Path(__file__).parent / "data" / "participants.csv"
 DAILY_PATH = Path(__file__).parent / "data" / "daily_attendance.csv"
 GOOGLE_SHEET_ID = "1rVwWjo6EOdlRoqtrZ4v4d68vXbC2Pw7HQ3zaNpKIE34"
+REPORT_SHEET_ID = "13rFvlyikQrFbEQBssEurh2J9PBFqyw_5TzbQi0xMy7o"
 OAUTH_TOKEN_PATH = Path(__file__).parent / "google_oauth_token.json"
 CACHE_SCHEMA_VERSION = "2026-08-12-risk-percent-v2"
+REPORT_HEADERS = [
+    "작성일시",
+    "기준일",
+    "작성자",
+    "전체 요약",
+    "결석·이상 증가 원인",
+    "특이사항",
+    "조치 내용",
+    "추후 확인사항",
+]
 
 
 def _authorized_user_credentials() -> dict | None:
@@ -55,6 +67,42 @@ def load_allowed_emails(sheet_id: str, credentials: dict) -> set[str]:
         if email and "@" in email and active not in disabled_values:
             allowed.add(email)
     return allowed
+
+
+def _report_service_account_credentials() -> dict | None:
+    """Return the report writer credential stored only in Streamlit secrets."""
+    try:
+        return dict(st.secrets["report_service_account"])
+    except (KeyError, StreamlitSecretNotFoundError):
+        return None
+
+
+@st.cache_data(ttl="1m", max_entries=2, show_spinner=False)
+def load_daily_reports(sheet_id: str, credentials: dict) -> pd.DataFrame:
+    import gspread
+
+    client = gspread.service_account_from_dict(credentials)
+    worksheet = client.open_by_key(sheet_id).sheet1
+    values = worksheet.get_all_values()
+    if not values or values[0] != REPORT_HEADERS:
+        return pd.DataFrame(columns=REPORT_HEADERS)
+    rows = worksheet.get_all_records(expected_headers=REPORT_HEADERS)
+    frame = pd.DataFrame(rows, columns=REPORT_HEADERS)
+    if not frame.empty:
+        frame["기준일"] = pd.to_datetime(frame["기준일"], errors="coerce").dt.date
+    return frame
+
+
+def save_daily_report(sheet_id: str, credentials: dict, values: list[str]) -> None:
+    import gspread
+
+    client = gspread.service_account_from_dict(credentials)
+    worksheet = client.open_by_key(sheet_id).sheet1
+    if not worksheet.row_values(1):
+        worksheet.update("A1:H1", [REPORT_HEADERS])
+        worksheet.freeze(rows=1)
+    worksheet.append_row(values, value_input_option="USER_ENTERED")
+    load_daily_reports.clear()
 
 
 @st.cache_data(ttl="10m", max_entries=3, show_spinner="교육생 현황을 불러오는 중입니다...")
@@ -354,6 +402,7 @@ def require_access() -> None:
             st.caption(f"로그인: {email}")
             if st.button("로그아웃", icon=":material/logout:", width="stretch"):
                 st.logout()
+        st.session_state["current_user_email"] = email
         return
 
     try:
@@ -361,12 +410,14 @@ def require_access() -> None:
     except (KeyError, StreamlitSecretNotFoundError):
         password = ""
     if not password:
+        st.session_state["current_user_email"] = "local-admin"
         st.info(
             "로컬 미리보기 모드입니다. 공개 배포 환경에서는 Google 로그인이 필수입니다.",
             icon=":material/shield:",
         )
         return
     if st.session_state.get("authenticated"):
+        st.session_state["current_user_email"] = "local-admin"
         return
     st.title("K-뉴딜 아카데미 통합 현황")
     entered = st.text_input("접근 비밀번호", type="password")
@@ -438,374 +489,7 @@ with st.container(horizontal=True, horizontal_alignment="distribute"):
         chart_data=filtered.groupby("반").size().tolist(),
         chart_type="bar",
     )
-    st.metric("평균 출석률", f"{filtered['출석률'].clip(upper=1).mean():.1%}" if len(filtered) else "-", border=True)
-    st.metric("고위험", f"{(filtered['위험등급'] == '고위험').sum():,}명", border=True)
-    st.metric("주의·관찰", f"{filtered['위험등급'].isin(['주의', '관찰']).sum():,}명", border=True)
-
-overview, warning, people, classes_view, period_view = st.tabs(
-    ["운영 요약", "이탈 조기경보", "전체 교육생", "반별 현황", "기간별 출결"],
-    default="운영 요약",
-)
-
-with overview:
-    overview_daily = daily_df.copy()
-    if query:
-        overview_daily = overview_daily[
-            overview_daily["이름"].str.contains(query.strip(), case=False, na=False)
-        ]
-    if regions:
-        overview_daily = overview_daily[overview_daily["권역"].isin(regions)]
-    if classes:
-        overview_daily = overview_daily[overview_daily["반"].isin(classes)]
-
-    if overview_daily.empty:
-        st.info("현재 필터에 해당하는 출결 기록이 없습니다.", icon=":material/filter_alt_off:")
-    else:
-        expected_people = max(overview_daily["이름"].nunique(), 1)
-        daily_coverage = overview_daily.groupby("날짜")["이름"].nunique().sort_index()
-        minimum_complete = max(1, int(expected_people * 0.8))
-        completed_dates = daily_coverage[daily_coverage >= minimum_complete]
-        if not completed_dates.empty:
-            latest_date = completed_dates.index.max()
-            coverage_note = "입력 완료 기준 80% 이상"
-        else:
-            latest_date = daily_coverage.idxmax()
-            coverage_note = "입력 건수가 가장 많은 날짜"
-        latest = overview_daily[overview_daily["날짜"] == latest_date].copy()
-        latest_coverage = len(latest) / expected_people
-        displayed_coverage = min(latest_coverage, 1.0)
-        excess_records = max(len(latest) - expected_people, 0)
-        latest_status = (
-            latest["상태"]
-            .value_counts()
-            .reindex(["출석", "인정출석", "결석", "지각", "조퇴", "외출"], fill_value=0)
-            .rename_axis("상태")
-            .reset_index(name="인원")
-        )
-        latest_events = int(latest["상태"].isin(["지각", "조퇴", "외출"]).sum())
-        latest_absences = int((latest["상태"] == "결석").sum())
-        latest_present = int(latest["상태"].isin(["출석", "인정출석", "지각", "조퇴", "외출"]).sum())
-        latest_rate = latest_present / max(len(latest), 1)
-
-        with st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
-            with st.container(gap=None):
-                st.subheader("오늘의 운영 요약")
-                st.caption(
-                    f"최근 집계일 {latest_date:%Y-%m-%d} · {coverage_note} · "
-                    f"기준 {expected_people:,}명 · 입력 {len(latest):,}건"
-                )
-            with st.container(horizontal=True, vertical_alignment="center", gap="small"):
-                st.badge(
-                    f"입력률 {displayed_coverage:.0%}",
-                    color="green" if latest_coverage >= 0.8 else "orange",
-                    icon=":material/fact_check:",
-                )
-                if excess_records:
-                    st.badge(
-                        f"신규·중복 확인 {excess_records:,}명",
-                        color="orange",
-                        icon=":material/person_search:",
-                    )
-
-        with st.container(horizontal=True, horizontal_alignment="distribute"):
-            st.metric("당일 출석률", f"{latest_rate:.1%}", border=True)
-            st.metric("결석", f"{latest_absences:,}명", border=True)
-            st.metric("지각·조퇴·외출", f"{latest_events:,}명", border=True)
-            st.metric("확인 필요", f"{latest_absences + latest_events:,}명", border=True)
-
-        status_chart = (
-            alt.Chart(latest_status[latest_status["인원"] > 0])
-            .mark_arc(innerRadius=55, outerRadius=90)
-            .encode(
-                theta=alt.Theta("인원:Q"),
-                color=alt.Color(
-                    "상태:N",
-                    scale=alt.Scale(
-                        domain=["출석", "인정출석", "결석", "지각", "조퇴", "외출"],
-                        range=["#1967D2", "#188038", "#B3261E", "#E37400", "#F9AB00", "#9334E6"],
-                    ),
-                    legend=alt.Legend(title=None, orient="bottom", columns=3),
-                ),
-                tooltip=["상태", alt.Tooltip("인원:Q", format="d")],
-            )
-            .properties(height=250)
-        )
-
-        class_daily = latest.assign(
-            출석인정=latest["상태"].isin(["출석", "인정출석", "지각", "조퇴", "외출"]).astype(int),
-            확인필요=latest["상태"].isin(["결석", "지각", "조퇴", "외출"]).astype(int),
-        )
-        class_daily = (
-            class_daily.groupby(["반번호", "반", "권역", "과정"], as_index=False)
-            .agg(교육생=("이름", "count"), 출석인원=("출석인정", "sum"), 확인필요=("확인필요", "sum"))
-            .assign(출석률=lambda x: x["출석인원"] / x["교육생"])
-            .assign(
-                출석구간=lambda x: pd.cut(
-                    x["출석률"],
-                    bins=[-float("inf"), 0.9, 0.95, float("inf")],
-                    labels=["90% 미만", "90~95%", "95% 이상"],
-                    right=False,
-                )
-            )
-            .sort_values("반번호")
-        )
-        class_order = class_daily["반"].tolist()
-        class_chart_height = max(360, len(class_daily) * 29)
-        class_bars = (
-            alt.Chart(class_daily)
-            .mark_bar(cornerRadiusEnd=5, size=18)
-            .encode(
-                y=alt.Y(
-                    "반:N",
-                    sort=class_order,
-                    title=None,
-                    axis=alt.Axis(labelLimit=90, labelPadding=8, labelOverlap=False),
-                ),
-                x=alt.X(
-                    "출석률:Q",
-                    title=None,
-                    scale=alt.Scale(domain=[0, 1.08]),
-                    axis=alt.Axis(format="%", values=[0, 0.25, 0.5, 0.75, 1]),
-                ),
-                color=alt.Color(
-                    "출석구간:N",
-                    scale=alt.Scale(
-                        domain=["90% 미만", "90~95%", "95% 이상"],
-                        range=["#B3261E", "#E37400", "#1967D2"],
-                    ),
-                    legend=None,
-                ),
-                tooltip=[
-                    "반",
-                    "권역",
-                    "과정",
-                    alt.Tooltip("교육생:Q", format="d"),
-                    alt.Tooltip("출석률:Q", format=".1%"),
-                    alt.Tooltip("확인필요:Q", title="확인 필요", format="d"),
-                ],
-            )
-        )
-        class_labels = (
-            alt.Chart(class_daily)
-            .mark_text(align="left", baseline="middle", dx=6, fontSize=12, fontWeight="bold", color="#3C4043")
-            .encode(
-                y=alt.Y("반:N", sort=class_order),
-                x=alt.X("출석률:Q"),
-                text=alt.Text("출석률:Q", format=".1%"),
-            )
-        )
-        class_chart = (class_bars + class_labels).properties(height=class_chart_height)
-
-        chart_left, chart_right = st.columns([0.8, 1.7], gap="medium")
-        with chart_left:
-            with st.container(border=True, height="stretch"):
-                st.markdown("**최근 출결 구성**")
-                st.altair_chart(status_chart)
-        with chart_right:
-            with st.container(border=True, height="stretch"):
-                st.markdown("**반별 당일 출석률**")
-                st.caption("반 번호 순으로 전체 17개 반을 표시합니다. 빨강은 90% 미만, 주황은 95% 미만입니다.")
-                class_chart_tab, class_table_tab = st.tabs(["출석률 그래프", "반별 요약표"])
-                with class_chart_tab:
-                    st.altair_chart(class_chart)
-                with class_table_tab:
-                    st.dataframe(
-                        class_daily[["반", "권역", "과정", "교육생", "출석률", "확인필요"]],
-                        hide_index=True,
-                        column_config={
-                            "반": st.column_config.TextColumn("반", pinned=True),
-                            "교육생": st.column_config.NumberColumn("교육생", format="%d명"),
-                            "출석률": st.column_config.ProgressColumn(
-                                "당일 출석률", format="percent", min_value=0, max_value=1
-                            ),
-                            "확인필요": st.column_config.NumberColumn("확인 필요", format="%d명"),
-                        },
-                        height=min(610, 38 + len(class_daily) * 35),
-                        key="latest_class_summary_table",
-                    )
-
-        attention = latest[latest["상태"].isin(["결석", "지각", "조퇴", "외출"])][
-            ["반", "권역", "과정", "이름", "상태"]
-        ].sort_values(["상태", "반", "이름"])
-        with st.container(border=True):
-            with st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
-                st.markdown("**당일 확인 명단**")
-                st.badge(f"{len(attention)}명", color="red" if len(attention) else "green")
-            if attention.empty:
-                st.caption("결석·지각·조퇴·외출 기록이 없습니다.")
-            else:
-                st.dataframe(
-                    attention,
-                    hide_index=True,
-                    column_config={
-                        "반": st.column_config.TextColumn("반", pinned=True),
-                        "이름": st.column_config.TextColumn("이름", pinned=True),
-                    },
-                    height=min(340, 38 + len(attention) * 35),
-                    key="latest_attention_table",
-                )
-
-with warning:
-    st.caption(
-        ":material/info: 출결 신호를 이용한 규칙 기반 조기경보입니다. 실제 중도탈락 확률이 아니며 담당자의 확인을 돕는 우선순위 지표입니다."
-    )
-    risk_df = filtered[filtered["위험등급"] != "정상"].sort_values(
-        ["위험점수", "출석률"], ascending=[False, True]
-    )
-    risk_counts = (
-        df["위험등급"]
-        .value_counts()
-        .reindex(["고위험", "주의", "관찰", "정상"], fill_value=0)
-        .rename_axis("위험등급")
-        .reset_index(name="인원")
-    )
-    chart = (
-        alt.Chart(risk_counts)
-        .mark_bar(cornerRadiusEnd=4)
-        .encode(
-            y=alt.Y("위험등급:N", sort=["고위험", "주의", "관찰", "정상"], title=None),
-            x=alt.X("인원:Q", title="교육생 수"),
-            color=alt.Color(
-                "위험등급:N",
-                scale=alt.Scale(
-                    domain=["고위험", "주의", "관찰", "정상"],
-                    range=["#B3261E", "#F29900", "#F9AB00", "#188038"],
-                ),
-                legend=None,
-            ),
-            tooltip=["위험등급", "인원"],
-        )
-        .properties(height=210)
-    )
-    chart_col, priority_col = st.columns([1.05, 1.95], gap="large")
-    with chart_col:
-        with st.container(border=True, height="stretch"):
-            st.subheader("위험등급 분포", help="전체 500명의 현재 조기경보 등급입니다.")
-            st.altair_chart(chart)
-            with st.container(horizontal=True, horizontal_alignment="distribute"):
-                st.badge(f"고위험 {int((df['위험등급'] == '고위험').sum())}명", color="red")
-                st.badge(f"주의 {int((df['위험등급'] == '주의').sum())}명", color="orange")
-                st.badge(f"관찰 {int((df['위험등급'] == '관찰').sum())}명", color="yellow")
-    with priority_col:
-        with st.container(border=True, height="stretch"):
-            st.subheader("오늘 먼저 확인할 교육생")
-            top_risk = risk_df.head(8)[["반", "이름", "위험등급", "주요 원인"]]
-            st.dataframe(
-                top_risk,
-                hide_index=True,
-                column_config={
-                    "반": st.column_config.TextColumn("반", pinned=True, width="small"),
-                    "이름": st.column_config.TextColumn("이름", pinned=True, width="small"),
-                },
-                height=286,
-                key="top_priority_table",
-            )
-            st.caption("출결 기반 상대 위험도가 높은 순서입니다. 현재 값은 실제 이탈확률이 아닙니다.")
-    st.space("small")
-    st.subheader(f"우선 확인 대상 {len(risk_df):,}명")
-    st.dataframe(
-        risk_df[["반", "권역", "과정", "이름", "출석률", "출석일수", "지각·조퇴·외출", "환산결석", "환산잔여횟수", "위험등급", "주요 원인"]],
-        hide_index=True,
-        column_config={
-            "반": st.column_config.TextColumn("반", pinned=True),
-            "이름": st.column_config.TextColumn("이름", pinned=True),
-            "출석률": st.column_config.ProgressColumn("출석률", format="percent", min_value=0, max_value=1.1),
-            "출석일수": st.column_config.NumberColumn("출석일수", format="%d일"),
-            "지각·조퇴·외출": st.column_config.NumberColumn("지각·조퇴·외출", format="%d회"),
-            "환산결석": st.column_config.NumberColumn("환산 결석", format="%d회"),
-            "환산잔여횟수": st.column_config.NumberColumn("다음 환산까지", format="%d/3회"),
-        },
-        height=520,
-        key="early_warning_table",
-    )
-
-with people:
-    display = filtered.sort_values(["위험점수", "출석률"], ascending=[False, True]).drop(
-        columns=["반번호", "위험점수", "이탈위험도"]
-    )
-    event = st.dataframe(
-        display,
-        hide_index=True,
-        on_select="rerun",
-        selection_mode="single-row",
-        column_config={
-            "반": st.column_config.TextColumn("반", pinned=True),
-            "이름": st.column_config.TextColumn("이름", pinned=True),
-            "출석률": st.column_config.ProgressColumn("출석률", format="percent", min_value=0, max_value=1.1),
-        },
-        height=610,
-        key="participant_table",
-    )
-    if event.selection.rows:
-        selected = display.iloc[event.selection.rows[0]]
-        st.info(
-            f"{selected['이름']} · {selected['반']} · {selected['위험등급']} · {selected['주요 원인']}",
-            icon=":material/person:",
-        )
-    st.download_button(
-        "현재 목록 Excel 다운로드",
-        data=to_excel_bytes(display),
-        file_name="교육생_통합현황.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        icon=":material/download:",
-    )
-
-with classes_view:
-    summary = (
-        filtered.groupby(["반번호", "반", "권역", "과정"], as_index=False)
-        .agg(
-            교육생=("이름", "count"),
-            평균출석률=("출석률", lambda s: s.clip(upper=1).mean()),
-            고위험=("위험등급", lambda s: int((s == "고위험").sum())),
-            주의=("위험등급", lambda s: int((s == "주의").sum())),
-            관찰=("위험등급", lambda s: int((s == "관찰").sum())),
-        )
-        .sort_values("반번호")
-    )
-    chart_data = summary[["반번호", "반", "고위험", "주의", "관찰"]].melt(
-        id_vars=["반번호", "반"],
-        value_vars=["고위험", "주의", "관찰"],
-        var_name="위험등급",
-        value_name="인원",
-    )
-    class_order = summary["반"].tolist()
-    stacked_bars = (
-        alt.Chart(chart_data)
-        .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
-        .encode(
-            x=alt.X("반:N", sort=class_order, title=None, axis=alt.Axis(labelAngle=0)),
-            y=alt.Y("sum(인원):Q", title="우선 확인 인원", axis=alt.Axis(tickMinStep=1)),
-            color=alt.Color(
-                "위험등급:N",
-                sort=["고위험", "주의", "관찰"],
-                scale=alt.Scale(
-                    domain=["고위험", "주의", "관찰"],
-                    range=["#B3261E", "#E37400", "#F9AB00"],
-                ),
-                legend=alt.Legend(title=None, orient="top"),
-            ),
-            order=alt.Order("위험등급:N", sort="ascending"),
-            tooltip=["반", "위험등급", alt.Tooltip("인원:Q", format="d")],
-        )
-    )
-    segment_labels = (
-        alt.Chart(chart_data[chart_data["인원"] > 0])
-        .mark_text(color="white", fontSize=12, fontWeight="bold")
-        .encode(
-            x=alt.X("반:N", sort=class_order),
-            y=alt.Y("sum(인원):Q", stack="center"),
-            detail="위험등급:N",
-            order=alt.Order("위험등급:N", sort="ascending"),
-            text=alt.Text("인원:Q", format="d"),
-        )
-    )
-    if len(summary) > 1:
-        with st.container(border=True):
-            st.subheader("반별 위험 신호 비교")
-            st.caption("여러 반의 고위험·주의·관찰 인원을 비교합니다.")
-            st.altair_chart((stacked_bars + segment_labels).properties(height=250))
-    elif len(summary) == 1:
-        selected_overview = summary.iloc[0]
+    st.metric("평균 출석률", f"{filtered['출석률'].clip(upper=1).mean():.1%}" if len(fil…4407 tokens truncated…ected_overview = summary.iloc[0]
         with st.container(border=True):
             with st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
                 with st.container(gap=None):
@@ -903,6 +587,174 @@ with classes_view:
                 )
     else:
         st.info("확인할 반의 행을 클릭해 주세요.", icon=":material/touch_app:")
+
+with manager_view:
+    priority_count = max(1, ceil(len(df) * 0.10))
+    priority = (
+        df.sort_values(["위험점수", "출석률", "지각·조퇴·외출"], ascending=[False, True, False])
+        .head(priority_count)
+        .copy()
+    )
+    priority.insert(0, "순위", range(1, len(priority) + 1))
+
+    with st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
+        with st.container(gap=None):
+            st.subheader("우선관리 상위 10%")
+            st.caption("전체 교육생 중 출석률과 지각·조퇴·외출 신호가 상대적으로 높은 순서입니다.")
+        st.badge(f"{len(priority)}명", color="red", icon=":material/priority_high:")
+
+    with st.container(horizontal=True, horizontal_alignment="distribute"):
+        st.metric("우선관리 인원", f"{len(priority)}명", border=True)
+        st.metric("평균 출석률", f"{priority['출석률'].clip(upper=1).mean():.1%}", border=True)
+        st.metric("80% 미만", f"{(priority['출석률'] < 0.8).sum()}명", border=True)
+        st.metric("환산 결석", f"{priority['환산결석'].sum():.0f}회", border=True)
+
+    st.dataframe(
+        priority[
+            [
+                "순위",
+                "반",
+                "권역",
+                "과정",
+                "이름",
+                "출석률",
+                "출석일수",
+                "지각·조퇴·외출",
+                "환산결석",
+                "주요 원인",
+            ]
+        ],
+        hide_index=True,
+        column_config={
+            "순위": st.column_config.NumberColumn("순위", format="%d", width="small", pinned=True),
+            "반": st.column_config.TextColumn("반", width="small", pinned=True),
+            "이름": st.column_config.TextColumn("이름", width="small", pinned=True),
+            "출석률": st.column_config.ProgressColumn(
+                "출석률", format="percent", min_value=0, max_value=1
+            ),
+            "출석일수": st.column_config.NumberColumn("출석일수", format="%d일"),
+            "지각·조퇴·외출": st.column_config.NumberColumn("지각·조퇴·외출", format="%d회"),
+            "환산결석": st.column_config.NumberColumn("환산 결석", format="%d회"),
+        },
+        height=min(650, 38 + len(priority) * 35),
+        key="priority_top_ten_table",
+    )
+
+    recent_dates = sorted(daily_df["날짜"].dropna().unique())[-10:]
+    recent_priority = daily_df.merge(priority[["반", "이름"]], on=["반", "이름"], how="inner")
+    recent_priority = recent_priority[recent_priority["날짜"].isin(recent_dates)]
+    if not recent_priority.empty:
+        status_matrix = (
+            recent_priority.pivot_table(
+                index=["반", "이름"], columns="날짜", values="상태", aggfunc="last", fill_value="-"
+            )
+            .reset_index()
+        )
+        status_matrix.columns = [
+            value.strftime("%m/%d") if isinstance(value, (pd.Timestamp, datetime)) else str(value)
+            for value in status_matrix.columns
+        ]
+        with st.container(border=True):
+            st.markdown("**최근 10일 출결 흐름**")
+            st.caption("우선관리 대상의 일별 상태를 한 화면에서 비교합니다.")
+            st.dataframe(
+                status_matrix,
+                hide_index=True,
+                column_config={
+                    "반": st.column_config.TextColumn("반", pinned=True),
+                    "이름": st.column_config.TextColumn("이름", pinned=True),
+                },
+                height=min(520, 38 + len(status_matrix) * 35),
+                key="priority_recent_status",
+            )
+
+    st.divider()
+    current_email = str(st.session_state.get("current_user_email", "")).strip().lower()
+    try:
+        admin_emails = {
+            str(value).strip().lower()
+            for value in st.secrets.get("ADMIN_EMAILS", ["hint.soyun@gmail.com"])
+            if str(value).strip()
+        }
+    except StreamlitSecretNotFoundError:
+        admin_emails = {"local-admin", "hint.soyun@gmail.com"}
+    is_admin = current_email in admin_emails or current_email == "local-admin"
+    report_credentials = _report_service_account_credentials()
+
+    st.subheader("관리자 데일리 리포트")
+    if report_credentials is None:
+        st.info(
+            "리포트 저장 연결을 준비 중입니다. Streamlit 비밀 설정이 완료되면 작성 기능이 열립니다.",
+            icon=":material/settings:",
+        )
+    elif is_admin:
+        latest_date = daily_df["날짜"].max().date() if not daily_df.empty else date.today()
+        latest_rows = daily_df[daily_df["날짜"].dt.date == latest_date]
+        absence_count = int((latest_rows["상태"] == "결석").sum())
+        event_count = int(latest_rows["상태"].isin(["지각", "조퇴", "외출"]).sum())
+        with st.form("manager_daily_report", border=True):
+            with st.container(horizontal=True):
+                report_date = st.date_input("기준일", value=latest_date, key="report_date")
+                author = st.text_input("작성자", value=current_email, disabled=True)
+            st.caption(f"기준일 자동 요약: 결석 {absence_count}명 · 지각·조퇴·외출 {event_count}명")
+            summary_text = st.text_area(
+                "전체 요약",
+                placeholder="오늘 출결 상황과 평소 대비 변화 내용을 적어주세요.",
+                key="report_summary",
+            )
+            cause_text = st.text_area(
+                "결석·이상 증가 원인",
+                placeholder="특정 반 행사, 신규 입과, 시스템 입력 지연 등 원인을 적어주세요.",
+                key="report_cause",
+            )
+            special_text = st.text_area("특이사항", key="report_special")
+            action_text = st.text_area("조치 내용", key="report_action")
+            followup_text = st.text_area("추후 확인사항", key="report_followup")
+            submitted = st.form_submit_button(
+                "데일리 리포트 저장", type="primary", icon=":material/save:"
+            )
+        if submitted:
+            if not summary_text.strip():
+                st.error("전체 요약을 입력해 주세요.")
+            else:
+                save_daily_report(
+                    REPORT_SHEET_ID,
+                    report_credentials,
+                    [
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        report_date.isoformat(),
+                        current_email,
+                        summary_text.strip(),
+                        cause_text.strip(),
+                        special_text.strip(),
+                        action_text.strip(),
+                        followup_text.strip(),
+                    ],
+                )
+                st.success("데일리 리포트를 저장했습니다.", icon=":material/check_circle:")
+    else:
+        st.caption("관리자 계정만 리포트를 작성할 수 있습니다. 저장된 리포트는 아래에서 조회할 수 있습니다.")
+
+    if report_credentials is not None:
+        try:
+            report_history = load_daily_reports(REPORT_SHEET_ID, report_credentials)
+            with st.container(border=True):
+                st.markdown("**최근 작성 리포트**")
+                if report_history.empty:
+                    st.caption("아직 저장된 리포트가 없습니다.")
+                else:
+                    st.dataframe(
+                        report_history.sort_values("작성일시", ascending=False),
+                        hide_index=True,
+                        column_config={
+                            "작성일시": st.column_config.TextColumn("작성일시", pinned=True),
+                            "기준일": st.column_config.DateColumn("기준일"),
+                        },
+                        height=min(420, 38 + len(report_history) * 35),
+                        key="daily_report_history",
+                    )
+        except Exception as error:
+            st.warning(f"저장된 리포트를 불러오지 못했습니다: {error}", icon=":material/cloud_off:")
 
 with period_view:
     st.subheader("일자·주간·월간 출결")
@@ -1022,3 +874,4 @@ with period_view:
                 height=420,
                 key="daily_attendance_detail",
             )
+
