@@ -3,7 +3,7 @@ from __future__ import annotations
 from io import BytesIO
 
 from reportlab.graphics.charts.barcharts import HorizontalBarChart, VerticalBarChart
-from reportlab.graphics.shapes import Drawing, String
+from reportlab.graphics.shapes import Drawing, Rect, String
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.pagesizes import A4, landscape
@@ -91,27 +91,39 @@ def _kpi_table(priority, dropouts, styles):
     return table
 
 
-def _class_chart(priority) -> Drawing:
-    grouped = priority.groupby("반", as_index=False).size()
-    labels = grouped["반"].tolist()
-    values = grouped["size"].astype(int).tolist()
+def _class_chart(priority, dropouts) -> Drawing:
+    def class_number(label):
+        digits = "".join(character for character in str(label) if character.isdigit())
+        return int(digits or 999)
+
+    labels = sorted(set(priority["반"].tolist()) | set(dropouts["반"].tolist()), key=class_number)
+    priority_counts = priority["반"].value_counts().to_dict()
+    dropout_counts = dropouts["반"].value_counts().to_dict()
+    values = [int(priority_counts.get(label, 0)) for label in labels]
+    dropout_values = [int(dropout_counts.get(label, 0)) for label in labels]
     drawing = Drawing(365, 205)
-    drawing.add(String(8, 190, "반별 우선관리 인원", fontName=FONT_BOLD, fontSize=11, fillColor=NAVY))
+    drawing.add(String(8, 190, "반별 우선관리·퇴소 인원", fontName=FONT_BOLD, fontSize=11, fillColor=NAVY))
+    drawing.add(Rect(205, 188, 7, 7, fillColor=BLUE, strokeColor=BLUE))
+    drawing.add(String(216, 189, "우선관리", fontName=FONT_REGULAR, fontSize=7, fillColor=NAVY))
+    drawing.add(Rect(274, 188, 7, 7, fillColor=colors.HexColor("#5F6368"), strokeColor=colors.HexColor("#5F6368")))
+    drawing.add(String(285, 189, "퇴소", fontName=FONT_REGULAR, fontSize=7, fillColor=NAVY))
     chart = VerticalBarChart()
     chart.x, chart.y, chart.width, chart.height = 36, 35, 315, 135
-    chart.data = [values]
+    chart.data = [values, dropout_values]
     chart.categoryAxis.categoryNames = labels
     chart.categoryAxis.labels.fontName = FONT_REGULAR
     chart.categoryAxis.labels.fontSize = 6.5
     chart.categoryAxis.labels.angle = 30
     chart.categoryAxis.labels.dy = -8
     chart.valueAxis.valueMin = 0
-    chart.valueAxis.valueMax = max(max(values, default=1) + 1, 3)
+    chart.valueAxis.valueMax = max(max(values + dropout_values, default=1) + 1, 3)
     chart.valueAxis.valueStep = 1
     chart.valueAxis.labels.fontName = FONT_REGULAR
     chart.valueAxis.labels.fontSize = 7
     chart.bars[0].fillColor = BLUE
     chart.bars[0].strokeColor = BLUE
+    chart.bars[1].fillColor = colors.HexColor("#5F6368")
+    chart.bars[1].strokeColor = colors.HexColor("#5F6368")
     drawing.add(chart)
     return drawing
 
@@ -243,7 +255,7 @@ def build_priority_pdf(priority, dropouts, report_history, as_of: str) -> bytes:
         Spacer(1, 6 * mm),
         _kpi_table(priority, dropouts, styles),
         Spacer(1, 6 * mm),
-        Table([[_class_chart(priority), _attendance_chart(priority)]], colWidths=[132 * mm, 132 * mm]),
+        Table([[_class_chart(priority, dropouts), _attendance_chart(priority)]], colWidths=[132 * mm, 132 * mm]),
         Spacer(1, 3 * mm),
         Paragraph("※ 이 자료는 규칙 기반 관리 우선순위이며 실제 중도탈락 확률이 아닙니다.", styles["SubtitleKo"]),
         PageBreak(),
