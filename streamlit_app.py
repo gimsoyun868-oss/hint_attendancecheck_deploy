@@ -530,6 +530,14 @@ with overview:
             class_daily.groupby(["반번호", "반", "권역", "과정"], as_index=False)
             .agg(교육생=("이름", "count"), 출석인원=("출석인정", "sum"), 확인필요=("확인필요", "sum"))
             .assign(출석률=lambda x: x["출석인원"] / x["교육생"])
+            .assign(
+                출석구간=lambda x: pd.cut(
+                    x["출석률"],
+                    bins=[-float("inf"), 0.9, 0.95, float("inf")],
+                    labels=["90% 미만", "90~95%", "95% 이상"],
+                    right=False,
+                )
+            )
             .sort_values("반번호")
         )
         class_order = class_daily["반"].tolist()
@@ -550,10 +558,13 @@ with overview:
                     scale=alt.Scale(domain=[0, 1.08]),
                     axis=alt.Axis(format="%", values=[0, 0.25, 0.5, 0.75, 1]),
                 ),
-                color=alt.condition(
-                    "datum.출석률 < 0.9",
-                    alt.value("#B3261E"),
-                    alt.condition("datum.출석률 < 0.95", alt.value("#E37400"), alt.value("#1967D2")),
+                color=alt.Color(
+                    "출석구간:N",
+                    scale=alt.Scale(
+                        domain=["90% 미만", "90~95%", "95% 이상"],
+                        range=["#B3261E", "#E37400", "#1967D2"],
+                    ),
+                    legend=None,
                 ),
                 tooltip=[
                     "반",
