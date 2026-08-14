@@ -116,6 +116,7 @@ def load_google_sheet(
     spreadsheet = client.open_by_key(sheet_id)
     people_records: list[dict] = []
     daily_records: list[dict] = []
+    today = pd.Timestamp.now(tz="Asia/Seoul").tz_localize(None).normalize()
 
     for worksheet in spreadsheet.worksheets():
         match = re.match(r"^(\d+)\.\s*(.+?)_(.+)$", worksheet.title)
@@ -133,7 +134,7 @@ def load_google_sheet(
             if column < 16:
                 continue
             parsed_date = _parse_sheet_date(raw_date)
-            if parsed_date is not None:
+            if parsed_date is not None and parsed_date <= today:
                 date_columns.append((column, parsed_date))
 
         for row in values[18:]:
