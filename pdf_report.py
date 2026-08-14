@@ -251,7 +251,7 @@ def build_priority_pdf(priority, dropouts, report_history, as_of: str) -> bytes:
     )
     story = [
         Paragraph("K-뉴딜 아카데미 우선관리 리포트", styles["TitleKo"]),
-        Paragraph(f"기준일 {as_of} | 출결 기반 우선관리 상위 10%", styles["SubtitleKo"]),
+        Paragraph(f"기준일 {as_of} | 출결 기반 우선관리 상위 2%", styles["SubtitleKo"]),
         Spacer(1, 6 * mm),
         _kpi_table(priority, dropouts, styles),
         Spacer(1, 6 * mm),
