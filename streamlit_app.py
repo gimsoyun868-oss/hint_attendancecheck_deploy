@@ -1136,7 +1136,6 @@ with manager_view:
                 key="report_cause",
             )
             special_text = st.text_area("특이사항", key="report_special")
-            action_text = st.text_area("조치 내용", key="report_action")
             followup_text = st.text_area("추후 확인사항", key="report_followup")
             submitted = st.form_submit_button(
                 "데일리 리포트 저장", type="primary", icon=":material/save:"
@@ -1155,7 +1154,7 @@ with manager_view:
                         summary_text.strip(),
                         cause_text.strip(),
                         special_text.strip(),
-                        action_text.strip(),
+                        "",
                         followup_text.strip(),
                     ],
                 )
