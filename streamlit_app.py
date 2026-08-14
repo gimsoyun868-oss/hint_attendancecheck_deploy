@@ -114,6 +114,8 @@ def load_participants(path: str, modified_at: float, schema_version: str) -> pd.
     frame["출석률"] = pd.to_numeric(frame["출석률"], errors="coerce").clip(lower=0, upper=1)
     frame["출석일수"] = pd.to_numeric(frame["출석일수"], errors="coerce")
     frame["지각·조퇴·외출"] = pd.to_numeric(frame["지각·조퇴·외출"], errors="coerce").fillna(0)
+    if "재적상태" not in frame.columns:
+        frame["재적상태"] = "재적"
     return add_early_warning(frame)
 
 
@@ -147,6 +149,46 @@ def _parse_sheet_date(value):
     return None if pd.isna(parsed) else parsed.normalize()
 
 
+def _dark_name_rows(spreadsheet) -> dict[str, set[int]]:
+    """Return zero-based row numbers whose name cell uses a dark fill."""
+    ranges = [f"'{worksheet.title.replace(chr(39), chr(39) * 2)}'!M19:M200" for worksheet in spreadsheet.worksheets()]
+    try:
+        metadata = spreadsheet.fetch_sheet_metadata(
+            params={
+                "includeGridData": "true",
+                "ranges": ranges,
+                "fields": "sheets(properties(title),data(startRow,rowData(values(effectiveFormat(backgroundColor,backgroundColorStyle)))))",
+            }
+        )
+    except Exception:
+        return {}
+
+    dark_rows: dict[str, set[int]] = {}
+    for sheet in metadata.get("sheets", []):
+        title = sheet.get("properties", {}).get("title", "")
+        rows: set[int] = set()
+        for grid in sheet.get("data", []):
+            start_row = int(grid.get("startRow", 18))
+            for offset, row_data in enumerate(grid.get("rowData", [])):
+                values = row_data.get("values", [])
+                if not values:
+                    continue
+                effective_format = values[0].get("effectiveFormat", {})
+                color = (
+                    effective_format.get("backgroundColorStyle", {}).get("rgbColor")
+                    or effective_format.get("backgroundColor", {})
+                )
+                red = float(color.get("red", 0))
+                green = float(color.get("green", 0))
+                blue = float(color.get("blue", 0))
+                luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+                if color and luminance < 0.45:
+                    rows.add(start_row + offset)
+        if rows:
+            dark_rows[title] = rows
+    return dark_rows
+
+
 @st.cache_data(ttl="2m", max_entries=2, show_spinner="구글 시트 최신 내용을 동기화하는 중입니다...")
 def load_google_sheet(
     sheet_id: str, credentials: dict, credential_type: str = "service_account"
@@ -164,6 +206,7 @@ def load_google_sheet(
     else:
         client = gspread.service_account_from_dict(credentials)
     spreadsheet = client.open_by_key(sheet_id)
+    dropout_rows = _dark_name_rows(spreadsheet)
     people_records: list[dict] = []
     daily_records: list[dict] = []
     today = pd.Timestamp.now(tz="Asia/Seoul").tz_localize(None).normalize()
@@ -187,7 +230,7 @@ def load_google_sheet(
             if parsed_date is not None and parsed_date <= today:
                 date_columns.append((column, parsed_date))
 
-        for row in values[18:]:
+        for row_index, row in enumerate(values[18:], start=18):
             name = row[12].strip() if len(row) > 12 else ""
             if not name or name.startswith("※"):
                 break
@@ -204,6 +247,7 @@ def load_google_sheet(
                     "출석률": rate,
                     "출석일수": days,
                     "지각·조퇴·외출": events,
+                    "재적상태": "퇴소" if row_index in dropout_rows.get(worksheet.title, set()) else "재적",
                     "위험구간": "80% 미만" if rate < 0.8 else "90% 미만" if rate < 0.9 else "정상",
                 }
             )
@@ -303,6 +347,14 @@ def add_early_warning(frame: pd.DataFrame) -> pd.DataFrame:
         converted_absence, event_remainder = divmod(events, 3)
         score = 0
         causes: list[str] = []
+
+        if str(row.get("재적상태", "재적")) == "퇴소":
+            scores.append(0)
+            levels.append("퇴소")
+            reasons.append("퇴소자")
+            converted_absences.append(converted_absence)
+            remaining_events.append(event_remainder)
+            continue
 
         if rate < 0.70:
             score += 60
@@ -457,7 +509,7 @@ with st.sidebar:
     classes = st.multiselect("반", df.sort_values("반번호")["반"].drop_duplicates().tolist(), default=[])
     selected_levels = st.pills(
         "위험등급",
-        ["고위험", "주의", "관찰", "정상"],
+        ["고위험", "주의", "관찰", "정상", "퇴소"],
         selection_mode="multi",
         default=[],
     )
@@ -958,9 +1010,11 @@ with classes_view:
         st.info("확인할 반의 행을 클릭해 주세요.", icon=":material/touch_app:")
 
 with manager_view:
-    priority_count = max(1, ceil(len(df) * 0.10))
+    active_students = df[df["재적상태"] != "퇴소"].copy()
+    dropouts = df[df["재적상태"] == "퇴소"].sort_values(["반번호", "이름"]).copy()
+    priority_count = max(1, ceil(len(active_students) * 0.10))
     priority = (
-        df.sort_values(["위험점수", "출석률", "지각·조퇴·외출"], ascending=[False, True, False])
+        active_students.sort_values(["위험점수", "출석률", "지각·조퇴·외출"], ascending=[False, True, False])
         .head(priority_count)
         .copy()
     )
@@ -977,6 +1031,7 @@ with manager_view:
         st.metric("평균 출석률", f"{priority['출석률'].clip(upper=1).mean():.1%}", border=True)
         st.metric("80% 미만", f"{(priority['출석률'] < 0.8).sum()}명", border=True)
         st.metric("환산 결석", f"{priority['환산결석'].sum():.0f}회", border=True)
+        st.metric("퇴소자", f"{len(dropouts)}명", border=True)
 
     st.dataframe(
         priority[
@@ -1035,6 +1090,30 @@ with manager_view:
                 },
                 height=min(520, 38 + len(status_matrix) * 35),
                 key="priority_recent_status",
+            )
+
+    with st.container(border=True):
+        with st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
+            with st.container(gap=None):
+                st.markdown("**퇴소자 현황**")
+                st.caption("원본 구글 시트에서 이름 셀이 검은색으로 표시된 교육생입니다.")
+            st.badge(f"{len(dropouts)}명", color="gray", icon=":material/person_off:")
+        if dropouts.empty:
+            st.caption("현재 확인된 퇴소자가 없습니다.")
+        else:
+            st.dataframe(
+                dropouts[["반", "권역", "과정", "이름", "출석률", "출석일수", "재적상태"]],
+                hide_index=True,
+                column_config={
+                    "반": st.column_config.TextColumn("반", pinned=True),
+                    "이름": st.column_config.TextColumn("이름", pinned=True),
+                    "출석률": st.column_config.ProgressColumn(
+                        "퇴소 시점 출석률", format="percent", min_value=0, max_value=1
+                    ),
+                    "출석일수": st.column_config.NumberColumn("출석일수", format="%d일"),
+                },
+                height=min(360, 38 + len(dropouts) * 35),
+                key="dropout_status_table",
             )
 
     st.divider()
@@ -1135,6 +1214,7 @@ with manager_view:
                 "PDF 다운로드",
                 data=build_priority_pdf(
                     priority.drop(columns="순위"),
+                    dropouts,
                     report_history,
                     daily_df["날짜"].max().strftime("%Y-%m-%d"),
                 ),
