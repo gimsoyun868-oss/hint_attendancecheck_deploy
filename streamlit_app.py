@@ -1015,7 +1015,7 @@ with classes_view:
 with manager_view:
     active_students = df[df["재적상태"] != "퇴소"].copy()
     dropouts = df[df["재적상태"] == "퇴소"].sort_values(["반번호", "이름"]).copy()
-    priority_count = max(1, ceil(len(active_students) * 0.10))
+    priority_count = max(1, ceil(len(active_students) * 0.02))
     priority = (
         active_students.sort_values(["위험점수", "출석률", "지각·조퇴·외출"], ascending=[False, True, False])
         .head(priority_count)
@@ -1025,7 +1025,7 @@ with manager_view:
 
     with st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
         with st.container(gap=None):
-            st.subheader("우선관리 상위 10%")
+            st.subheader("우선관리 상위 2%")
             st.caption("전체 교육생 중 출석률과 지각·조퇴·외출 신호가 상대적으로 높은 순서입니다.")
         st.badge(f"{len(priority)}명", color="red", icon=":material/priority_high:")
 
