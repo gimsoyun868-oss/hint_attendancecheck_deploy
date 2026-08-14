@@ -1095,56 +1095,6 @@ with manager_view:
                 key="priority_recent_status",
             )
 
-    with st.container(border=True):
-        with st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
-            with st.container(gap=None):
-                st.markdown("**퇴소자 현황**")
-                st.caption("원본 구글 시트에서 이름 셀이 검은색으로 표시된 교육생입니다.")
-            st.badge(f"{len(dropouts)}명", color="gray", icon=":material/person_off:")
-        if dropouts.empty:
-            st.caption("현재 확인된 퇴소자가 없습니다.")
-        else:
-            dropout_by_class = (
-                dropouts.groupby(["반번호", "반"], as_index=False)
-                .size()
-                .sort_values("반번호")
-                .rename(columns={"size": "퇴소자"})
-            )
-            dropout_bars = (
-                alt.Chart(dropout_by_class)
-                .mark_bar(color="#5F6368", cornerRadiusEnd=4)
-                .encode(
-                    x=alt.X("퇴소자:Q", title="퇴소자 수", axis=alt.Axis(tickMinStep=1)),
-                    y=alt.Y("반:N", sort=dropout_by_class["반"].tolist(), title=None),
-                    tooltip=["반", alt.Tooltip("퇴소자:Q", format="d")],
-                )
-                .properties(height=max(100, len(dropout_by_class) * 34))
-            )
-            dropout_labels = (
-                alt.Chart(dropout_by_class)
-                .mark_text(align="left", dx=6, color="#3C4043", fontWeight="bold")
-                .encode(
-                    x=alt.X("퇴소자:Q"),
-                    y=alt.Y("반:N", sort=dropout_by_class["반"].tolist()),
-                    text=alt.Text("퇴소자:Q", format="d"),
-                )
-            )
-            st.altair_chart(dropout_bars + dropout_labels)
-            st.dataframe(
-                dropouts[["반", "권역", "과정", "이름", "출석률", "출석일수", "재적상태"]],
-                hide_index=True,
-                column_config={
-                    "반": st.column_config.TextColumn("반", pinned=True),
-                    "이름": st.column_config.TextColumn("이름", pinned=True),
-                    "출석률": st.column_config.ProgressColumn(
-                        "퇴소 시점 출석률", format="percent", min_value=0, max_value=1
-                    ),
-                    "출석일수": st.column_config.NumberColumn("출석일수", format="%d일"),
-                },
-                height=min(360, 38 + len(dropouts) * 35),
-                key="dropout_status_table",
-            )
-
     st.divider()
     current_email = str(st.session_state.get("current_user_email", "")).strip().lower()
     try:
