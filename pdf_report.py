@@ -58,13 +58,14 @@ def _page_number(canvas, doc) -> None:
     canvas.restoreState()
 
 
-def _kpi_table(priority, styles):
+def _kpi_table(priority, dropouts, styles):
     rate = priority["출석률"].clip(upper=1).mean() if len(priority) else 0
     values = [
         ("우선관리", f"{len(priority)}명"),
         ("평균 출석률", f"{rate:.1%}"),
         ("80% 미만", f"{int((priority['출석률'] < 0.8).sum())}명"),
         ("환산 결석", f"{int(priority['환산결석'].sum())}회"),
+        ("퇴소자", f"{len(dropouts)}명"),
     ]
     cells = []
     for label, value in values:
@@ -74,7 +75,7 @@ def _kpi_table(priority, styles):
                 _paragraph(value, styles["kpi_value"]),
             ]
         )
-    table = Table([sum(cells, [])], colWidths=[31 * mm, 35 * mm] * 4, rowHeights=23 * mm)
+    table = Table([sum(cells, [])], colWidths=[24 * mm, 29 * mm] * 5, rowHeights=23 * mm)
     table.setStyle(
         TableStyle(
             [
@@ -179,7 +180,41 @@ def _priority_table(priority, styles):
     return table
 
 
-def build_priority_pdf(priority, report_history, as_of: str) -> bytes:
+def _dropout_table(dropouts, styles):
+    headers = ["반", "권역", "과정", "이름", "퇴소 시점 출석률", "출석일수", "재적상태"]
+    rows = [[_paragraph(value, styles["table_header"]) for value in headers]]
+    for _, row in dropouts.iterrows():
+        rows.append(
+            [
+                row["반"],
+                row["권역"],
+                row["과정"],
+                row["이름"],
+                f"{min(float(row['출석률']), 1):.1%}",
+                f"{int(row['출석일수'])}일",
+                "퇴소",
+            ]
+        )
+    table = Table(rows, repeatRows=1, colWidths=[20 * mm, 28 * mm, 76 * mm, 28 * mm, 38 * mm, 30 * mm, 28 * mm])
+    commands = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#3C4043")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 1), (-1, -1), FONT_REGULAR),
+        ("FONTSIZE", (0, 1), (-1, -1), 8),
+        ("GRID", (0, 0), (-1, -1), 0.5, GRID),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (0, 1), (-1, -1), "CENTER"),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]
+    for row_index in range(1, len(rows)):
+        if row_index % 2 == 0:
+            commands.append(("BACKGROUND", (0, row_index), (-1, row_index), LIGHT_GRAY))
+    table.setStyle(TableStyle(commands))
+    return table
+
+
+def build_priority_pdf(priority, dropouts, report_history, as_of: str) -> bytes:
     _register_fonts()
     styles = getSampleStyleSheet()
     styles.add(ParagraphStyle(name="TitleKo", fontName=FONT_BOLD, fontSize=22, leading=27, textColor=NAVY))
@@ -206,7 +241,7 @@ def build_priority_pdf(priority, report_history, as_of: str) -> bytes:
         Paragraph("K-뉴딜 아카데미 우선관리 리포트", styles["TitleKo"]),
         Paragraph(f"기준일 {as_of} | 출결 기반 우선관리 상위 10%", styles["SubtitleKo"]),
         Spacer(1, 6 * mm),
-        _kpi_table(priority, styles),
+        _kpi_table(priority, dropouts, styles),
         Spacer(1, 6 * mm),
         Table([[_class_chart(priority), _attendance_chart(priority)]], colWidths=[132 * mm, 132 * mm]),
         Spacer(1, 3 * mm),
@@ -215,6 +250,17 @@ def build_priority_pdf(priority, report_history, as_of: str) -> bytes:
         Paragraph("우선관리 대상 상세 명단", styles["SectionKo"]),
         _priority_table(priority, styles),
     ]
+
+    if dropouts is not None and not dropouts.empty:
+        story.extend(
+            [
+                PageBreak(),
+                Paragraph("퇴소자 현황", styles["SectionKo"]),
+                Paragraph("원본 구글 시트에서 이름 셀이 검은색으로 표시된 교육생입니다.", styles["SubtitleKo"]),
+                Spacer(1, 3 * mm),
+                _dropout_table(dropouts, styles),
+            ]
+        )
 
     if report_history is not None and not report_history.empty:
         latest = report_history.sort_values("작성일시", ascending=False).iloc[0]
