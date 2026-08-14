@@ -754,13 +754,13 @@ with warning:
     st.caption(
         ":material/info: 출결 신호를 이용한 규칙 기반 조기경보입니다. 실제 중도탈락 확률이 아니며 담당자의 확인을 돕는 우선순위 지표입니다."
     )
-    risk_df = filtered[filtered["위험등급"] != "정상"].sort_values(
+    risk_df = filtered[~filtered["위험등급"].isin(["정상", "퇴소"])].sort_values(
         ["위험점수", "출석률"], ascending=[False, True]
     )
     risk_counts = (
         df["위험등급"]
         .value_counts()
-        .reindex(["고위험", "주의", "관찰", "정상"], fill_value=0)
+        .reindex(["고위험", "주의", "관찰", "정상", "퇴소"], fill_value=0)
         .rename_axis("위험등급")
         .reset_index(name="인원")
     )
@@ -768,13 +768,13 @@ with warning:
         alt.Chart(risk_counts)
         .mark_bar(cornerRadiusEnd=4)
         .encode(
-            y=alt.Y("위험등급:N", sort=["고위험", "주의", "관찰", "정상"], title=None),
+            y=alt.Y("위험등급:N", sort=["고위험", "주의", "관찰", "정상", "퇴소"], title=None),
             x=alt.X("인원:Q", title="교육생 수"),
             color=alt.Color(
                 "위험등급:N",
                 scale=alt.Scale(
-                    domain=["고위험", "주의", "관찰", "정상"],
-                    range=["#B3261E", "#F29900", "#F9AB00", "#188038"],
+                    domain=["고위험", "주의", "관찰", "정상", "퇴소"],
+                    range=["#B3261E", "#F29900", "#F9AB00", "#188038", "#5F6368"],
                 ),
                 legend=None,
             ),
@@ -791,6 +791,7 @@ with warning:
                 st.badge(f"고위험 {int((df['위험등급'] == '고위험').sum())}명", color="red")
                 st.badge(f"주의 {int((df['위험등급'] == '주의').sum())}명", color="orange")
                 st.badge(f"관찰 {int((df['위험등급'] == '관찰').sum())}명", color="yellow")
+                st.badge(f"퇴소 {int((df['재적상태'] == '퇴소').sum())}명", color="gray")
     with priority_col:
         with st.container(border=True, height="stretch"):
             st.subheader("오늘 먼저 확인할 교육생")
@@ -864,12 +865,13 @@ with classes_view:
             고위험=("위험등급", lambda s: int((s == "고위험").sum())),
             주의=("위험등급", lambda s: int((s == "주의").sum())),
             관찰=("위험등급", lambda s: int((s == "관찰").sum())),
+            퇴소=("재적상태", lambda s: int((s == "퇴소").sum())),
         )
         .sort_values("반번호")
     )
-    chart_data = summary[["반번호", "반", "고위험", "주의", "관찰"]].melt(
+    chart_data = summary[["반번호", "반", "고위험", "주의", "관찰", "퇴소"]].melt(
         id_vars=["반번호", "반"],
-        value_vars=["고위험", "주의", "관찰"],
+        value_vars=["고위험", "주의", "관찰", "퇴소"],
         var_name="위험등급",
         value_name="인원",
     )
@@ -882,10 +884,10 @@ with classes_view:
             y=alt.Y("sum(인원):Q", title="우선 확인 인원", axis=alt.Axis(tickMinStep=1)),
             color=alt.Color(
                 "위험등급:N",
-                sort=["고위험", "주의", "관찰"],
+                sort=["고위험", "주의", "관찰", "퇴소"],
                 scale=alt.Scale(
-                    domain=["고위험", "주의", "관찰"],
-                    range=["#B3261E", "#E37400", "#F9AB00"],
+                    domain=["고위험", "주의", "관찰", "퇴소"],
+                    range=["#B3261E", "#E37400", "#F9AB00", "#5F6368"],
                 ),
                 legend=alt.Legend(title=None, orient="top"),
             ),
@@ -907,7 +909,7 @@ with classes_view:
     if len(summary) > 1:
         with st.container(border=True):
             st.subheader("반별 위험 신호 비교")
-            st.caption("여러 반의 고위험·주의·관찰 인원을 비교합니다.")
+            st.caption("여러 반의 고위험·주의·관찰·퇴소 인원을 비교합니다.")
             st.altair_chart((stacked_bars + segment_labels).properties(height=250))
     elif len(summary) == 1:
         selected_overview = summary.iloc[0]
@@ -923,6 +925,7 @@ with classes_view:
                 st.metric("고위험", f"{int(selected_overview['고위험'])}명", border=True)
                 st.metric("주의", f"{int(selected_overview['주의'])}명", border=True)
                 st.metric("관찰", f"{int(selected_overview['관찰'])}명", border=True)
+                st.metric("퇴소", f"{int(selected_overview['퇴소'])}명", border=True)
     st.caption(":material/touch_app: 아래 표에서 반을 클릭하면 해당 반의 교육생과 위험 현황이 열립니다.")
     class_event = st.dataframe(
         summary.drop(columns="반번호"),
@@ -969,7 +972,7 @@ with classes_view:
                 class_risk = (
                     class_df["위험등급"]
                     .value_counts()
-                    .reindex(["고위험", "주의", "관찰", "정상"], fill_value=0)
+                    .reindex(["고위험", "주의", "관찰", "정상", "퇴소"], fill_value=0)
                     .rename_axis("위험등급")
                     .reset_index(name="인원")
                 )
@@ -981,8 +984,8 @@ with classes_view:
                         color=alt.Color(
                             "위험등급:N",
                             scale=alt.Scale(
-                                domain=["고위험", "주의", "관찰", "정상"],
-                                range=["#B3261E", "#E37400", "#F9AB00", "#188038"],
+                                domain=["고위험", "주의", "관찰", "정상", "퇴소"],
+                                range=["#B3261E", "#E37400", "#F9AB00", "#188038", "#5F6368"],
                             ),
                             legend=alt.Legend(title=None, orient="bottom"),
                         ),
@@ -1101,6 +1104,32 @@ with manager_view:
         if dropouts.empty:
             st.caption("현재 확인된 퇴소자가 없습니다.")
         else:
+            dropout_by_class = (
+                dropouts.groupby(["반번호", "반"], as_index=False)
+                .size()
+                .sort_values("반번호")
+                .rename(columns={"size": "퇴소자"})
+            )
+            dropout_bars = (
+                alt.Chart(dropout_by_class)
+                .mark_bar(color="#5F6368", cornerRadiusEnd=4)
+                .encode(
+                    x=alt.X("퇴소자:Q", title="퇴소자 수", axis=alt.Axis(tickMinStep=1)),
+                    y=alt.Y("반:N", sort=dropout_by_class["반"].tolist(), title=None),
+                    tooltip=["반", alt.Tooltip("퇴소자:Q", format="d")],
+                )
+                .properties(height=max(100, len(dropout_by_class) * 34))
+            )
+            dropout_labels = (
+                alt.Chart(dropout_by_class)
+                .mark_text(align="left", dx=6, color="#3C4043", fontWeight="bold")
+                .encode(
+                    x=alt.X("퇴소자:Q"),
+                    y=alt.Y("반:N", sort=dropout_by_class["반"].tolist()),
+                    text=alt.Text("퇴소자:Q", format="d"),
+                )
+            )
+            st.altair_chart(dropout_bars + dropout_labels)
             st.dataframe(
                 dropouts[["반", "권역", "과정", "이름", "출석률", "출석일수", "재적상태"]],
                 hide_index=True,
