@@ -24,6 +24,11 @@ GOOGLE_SHEET_ID = "1rVwWjo6EOdlRoqtrZ4v4d68vXbC2Pw7HQ3zaNpKIE34"
 REPORT_SHEET_ID = "13rFvlyikQrFbEQBssEurh2J9PBFqyw_5TzbQi0xMy7o"
 OAUTH_TOKEN_PATH = Path(__file__).parent / "google_oauth_token.json"
 CACHE_SCHEMA_VERSION = "2026-08-12-risk-percent-v2"
+EDITOR_EMAILS = {
+    "hint.soyun@gmail.com",
+    "osudongi122@gmail.com",
+    "hint.kpc@gmail.com",
+}
 REPORT_HEADERS = [
     "작성일시",
     "기준일",
@@ -419,6 +424,7 @@ def require_access() -> None:
             for email in st.secrets.get("ALLOWED_EMAILS", [])
             if str(email).strip()
         }
+        allowed_emails.update(EDITOR_EMAILS)
         access_sheet_id = str(st.secrets.get("ACCESS_SHEET_ID", "")).strip()
     except StreamlitSecretNotFoundError:
         auth_configured = False
@@ -1098,13 +1104,13 @@ with manager_view:
     st.divider()
     current_email = str(st.session_state.get("current_user_email", "")).strip().lower()
     try:
-        admin_emails = {
+        admin_emails = EDITOR_EMAILS | {
             str(value).strip().lower()
             for value in st.secrets.get("ADMIN_EMAILS", ["hint.soyun@gmail.com"])
             if str(value).strip()
         }
     except StreamlitSecretNotFoundError:
-        admin_emails = {"local-admin", "hint.soyun@gmail.com"}
+        admin_emails = {"local-admin"} | EDITOR_EMAILS
     is_admin = current_email in admin_emails or current_email == "local-admin"
     report_credentials = _report_service_account_credentials()
     report_history = pd.DataFrame(columns=REPORT_HEADERS)
