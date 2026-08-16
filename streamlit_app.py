@@ -10,6 +10,8 @@ import pandas as pd
 import streamlit as st
 from streamlit.errors import StreamlitSecretNotFoundError
 
+from pdf_report import build_priority_pdf
+
 st.set_page_config(
     page_title="K-뉴딜아카데미 출결 현황",
     page_icon=":material/groups:",
@@ -1186,6 +1188,25 @@ with manager_view:
                     )
         except Exception as error:
             st.warning(f"저장된 리포트를 불러오지 못했습니다: {error}", icon=":material/cloud_off:")
+
+    with st.container(border=True):
+        with st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
+            with st.container(gap=None):
+                st.markdown("**PDF 리포트 출력**")
+                st.caption("핵심 지표, 반별 그래프, 출석률 그래프와 우선관리 명단을 한 파일로 저장합니다.")
+            st.download_button(
+                "PDF 다운로드",
+                data=build_priority_pdf(
+                    priority.drop(columns="순위"),
+                    dropouts,
+                    report_history,
+                    daily_df["날짜"].max().strftime("%Y-%m-%d"),
+                ),
+                file_name=f"K뉴딜_우선관리_리포트_{daily_df['날짜'].max().strftime('%Y%m%d')}.pdf",
+                mime="application/pdf",
+                icon=":material/picture_as_pdf:",
+                type="primary",
+            )
 
 with period_view:
     st.subheader("일자·주간·월간 출결")
