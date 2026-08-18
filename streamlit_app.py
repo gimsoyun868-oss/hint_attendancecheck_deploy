@@ -849,8 +849,9 @@ with people:
         height=610,
         key="participant_table",
     )
-    if event.selection.rows:
-        selected = display.iloc[event.selection.rows[0]]
+    selected_row = event.selection.rows[0] if event.selection.rows else None
+    if selected_row is not None and 0 <= selected_row < len(display):
+        selected = display.iloc[selected_row]
         st.info(
             f"{selected['이름']} · {selected['반']} · {selected['위험등급']} · {selected['주요 원인']}",
             icon=":material/person:",
@@ -949,8 +950,10 @@ with classes_view:
         height=330,
         key="class_summary",
     )
-    if class_event.selection.rows:
-        selected_summary = summary.drop(columns="반번호").iloc[class_event.selection.rows[0]]
+    displayed_summary = summary.drop(columns="반번호")
+    selected_class_row = class_event.selection.rows[0] if class_event.selection.rows else None
+    if selected_class_row is not None and 0 <= selected_class_row < len(displayed_summary):
+        selected_summary = displayed_summary.iloc[selected_class_row]
         selected_class = selected_summary["반"]
         class_df = df[df["반"] == selected_class].sort_values(
             ["위험점수", "출석률"], ascending=[False, True]
