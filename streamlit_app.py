@@ -1622,6 +1622,20 @@ with operation_view:
                 latest_operation_logs.sort_values("_작성일시")
                 .drop_duplicates("반", keep="last")
             )
+            counseling_names = []
+            for class_name, group in all_counseling.groupby("반"):
+                completed_names = group.loc[group["면담완료"], "이름"].astype(str).tolist()
+                incomplete_names = group.loc[~group["면담완료"], "이름"].astype(str).tolist()
+                counseling_names.append(
+                    {
+                        "반": class_name,
+                        "면담완료학생": ", ".join(completed_names) if completed_names else "-",
+                        "면담미완료학생": ", ".join(incomplete_names) if incomplete_names else "-",
+                    }
+                )
+            latest_operation_logs = latest_operation_logs.merge(
+                pd.DataFrame(counseling_names), on="반", how="left"
+            )
             with st.container(horizontal=True, horizontal_alignment="distribute"):
                 st.metric("별점 반영", f"{latest_operation_logs['반'].nunique()}개 반", border=True)
                 st.metric("평균 운영점수", f"{latest_operation_logs['평균점수'].mean():.1f} / 5점", border=True)
@@ -1631,7 +1645,10 @@ with operation_view:
                 st.metric("기준일", str(latest_operation_date), border=True)
             st.dataframe(
                 latest_operation_logs.sort_values("작성일시", ascending=False)[
-                    ["작성일시", "기준일", "반", "권역", "과정", "평균점수", "결석", "지각조퇴외출", "상태"]
+                    [
+                        "작성일시", "기준일", "반", "권역", "과정", "평균점수",
+                        "결석", "지각조퇴외출", "면담완료학생", "면담미완료학생", "상태",
+                    ]
                 ],
                 hide_index=True,
                 column_config={
@@ -1643,6 +1660,8 @@ with operation_view:
                     ),
                     "결석": st.column_config.NumberColumn("결석", format="%d명"),
                     "지각조퇴외출": st.column_config.NumberColumn("지각·조퇴·외출", format="%d명"),
+                    "면담완료학생": st.column_config.TextColumn("면담 완료 학생 이름", width="large"),
+                    "면담미완료학생": st.column_config.TextColumn("면담 미완료 학생 이름", width="large"),
                 },
                 height=min(430, 38 + len(latest_operation_logs) * 35),
                 key="operation_history_table",
