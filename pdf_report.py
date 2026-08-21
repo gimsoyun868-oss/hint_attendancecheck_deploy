@@ -378,7 +378,7 @@ def build_operations_pdf(class_summary, operation_logs, title: str, period_label
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
     ]))
 
-    headers = ["반", "권역", "과정", "출석률", "결석", "지각·조퇴·외출", "운영점수", "제출", "상태", "특이사항"]
+    headers = ["반", "권역", "과정", "출석률", "결석", "지각·조퇴·외출", "운영점수(5점)", "제출", "상태", "특이사항"]
     rows = [[_paragraph(value, styles["OpsHeader"]) for value in headers]]
     for _, row in class_summary.iterrows():
         rows.append([
