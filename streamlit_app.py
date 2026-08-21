@@ -28,6 +28,8 @@ GOOGLE_SHEET_ID = "1rVwWjo6EOdlRoqtrZ4v4d68vXbC2Pw7HQ3zaNpKIE34"
 REPORT_SHEET_ID = "13rFvlyikQrFbEQBssEurh2J9PBFqyw_5TzbQi0xMy7o"
 OPERATION_SHEET_TITLE = "운영일지"
 OPERATION_LOCAL_PATH = Path(__file__).parent / "data" / "operation_logs.csv"
+COUNSELING_SHEET_TITLE = "상담현황"
+COUNSELING_LOCAL_PATH = Path(__file__).parent / "data" / "counseling_status.csv"
 OAUTH_TOKEN_PATHS = [
     Path(__file__).parent / "google_oauth_token.json",
     Path(__file__).parent.parent / "dashboard_app" / "google_oauth_token.json",
@@ -55,6 +57,7 @@ OPERATION_HEADERS = [
     "출석", "인정출석", "결석", "지각조퇴외출",
     "항목별특이사항", "출결특이사항", "면담결과", "기타특이사항", "상태",
 ]
+COUNSELING_HEADERS = ["작성일시", "기준일", "반", "이름", "구분", "면담완료", "작성자", "상담요약"]
 
 
 def _authorized_user_credentials() -> dict | None:
@@ -225,6 +228,62 @@ def save_local_operation_log(values: list) -> None:
     updated.to_csv(OPERATION_LOCAL_PATH, index=False, encoding="utf-8-sig")
 
 
+@st.cache_data(ttl="1m", max_entries=2, show_spinner=False)
+def load_counseling_status(sheet_id: str, credentials: dict) -> pd.DataFrame:
+    import gspread
+
+    client = gspread.service_account_from_dict(credentials)
+    spreadsheet = client.open_by_key(sheet_id)
+    try:
+        worksheet = spreadsheet.worksheet(COUNSELING_SHEET_TITLE)
+    except gspread.WorksheetNotFound:
+        return pd.DataFrame(columns=COUNSELING_HEADERS)
+    values = worksheet.get_all_values()
+    if not values or values[0] != COUNSELING_HEADERS:
+        return pd.DataFrame(columns=COUNSELING_HEADERS)
+    frame = pd.DataFrame(worksheet.get_all_records(expected_headers=COUNSELING_HEADERS), columns=COUNSELING_HEADERS)
+    if not frame.empty:
+        frame["면담완료"] = frame["면담완료"].astype(str).str.lower().isin(["true", "y", "yes", "1", "완료"])
+    return frame
+
+
+def save_counseling_status(sheet_id: str, credentials: dict, rows: list[list]) -> None:
+    import gspread
+
+    client = gspread.service_account_from_dict(credentials)
+    spreadsheet = client.open_by_key(sheet_id)
+    try:
+        worksheet = spreadsheet.worksheet(COUNSELING_SHEET_TITLE)
+    except gspread.WorksheetNotFound:
+        worksheet = spreadsheet.add_worksheet(title=COUNSELING_SHEET_TITLE, rows=5000, cols=len(COUNSELING_HEADERS))
+    if not worksheet.row_values(1):
+        worksheet.update("A1:H1", [COUNSELING_HEADERS])
+        worksheet.freeze(rows=1)
+    if rows:
+        worksheet.append_rows(rows, value_input_option="USER_ENTERED")
+    load_counseling_status.clear()
+
+
+def load_local_counseling_status() -> pd.DataFrame:
+    if not COUNSELING_LOCAL_PATH.exists():
+        return pd.DataFrame(columns=COUNSELING_HEADERS)
+    frame = pd.read_csv(COUNSELING_LOCAL_PATH, encoding="utf-8-sig")
+    for column in COUNSELING_HEADERS:
+        if column not in frame.columns:
+            frame[column] = ""
+    frame["면담완료"] = frame["면담완료"].astype(str).str.lower().isin(["true", "y", "yes", "1", "완료"])
+    return frame[COUNSELING_HEADERS]
+
+
+def save_local_counseling_status(rows: list[list]) -> None:
+    if not rows:
+        return
+    COUNSELING_LOCAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    current = load_local_counseling_status()
+    updated = pd.concat([current, pd.DataFrame(rows, columns=COUNSELING_HEADERS)], ignore_index=True)
+    updated.to_csv(COUNSELING_LOCAL_PATH, index=False, encoding="utf-8-sig")
+
+
 def build_class_operations_summary(
     participants: pd.DataFrame,
     attendance: pd.DataFrame,
@@ -240,6 +299,12 @@ def build_class_operations_summary(
     if not logs_period.empty:
         log_dates = pd.to_datetime(logs_period["기준일"], errors="coerce").dt.date
         logs_period = logs_period[log_dates.between(start_date, end_date)].copy()
+        logs_period["_기준일"] = pd.to_datetime(logs_period["기준일"], errors="coerce")
+        logs_period["_작성일시"] = pd.to_datetime(logs_period["작성일시"], errors="coerce")
+        logs_period = (
+            logs_period.sort_values(["_기준일", "_작성일시"])
+            .drop_duplicates(["기준일", "반"], keep="last")
+        )
         for column in score_columns:
             logs_period[column] = pd.to_numeric(logs_period[column], errors="coerce")
         logs_period["운영점수"] = logs_period[score_columns].mean(axis=1)
@@ -722,6 +787,57 @@ def render_student_attendance_groups(class_rows: pd.DataFrame, key_prefix: str) 
             st.dataframe(general[columns], hide_index=True, column_config=config, key=f"{key_prefix}_general")
 
 
+def render_counseling_checklist(
+    class_rows: pd.DataFrame, counseling_history: pd.DataFrame, key: str
+) -> pd.DataFrame:
+    """Return an editable one-row-per-student counseling checklist."""
+    checklist = class_rows[class_rows["재적상태"] != "퇴소"][
+        ["반", "이름", "출석률"]
+    ].drop_duplicates(["반", "이름"]).sort_values(["출석률", "이름"])
+    checklist["구분"] = checklist["출석률"].apply(
+        lambda value: "결석 집중관리" if float(value) < 0.8 else "일반학생"
+    )
+    latest = pd.DataFrame(columns=["반", "이름", "면담완료", "상담요약"])
+    if not counseling_history.empty:
+        latest = counseling_history.copy()
+        latest["_작성일시"] = pd.to_datetime(latest["작성일시"], errors="coerce")
+        latest = latest.sort_values("_작성일시").drop_duplicates(["반", "이름"], keep="last")
+        latest = latest[["반", "이름", "면담완료", "상담요약"]]
+    checklist = checklist.merge(latest, on=["반", "이름"], how="left")
+    checklist["면담완료"] = checklist["면담완료"].fillna(False).astype(bool)
+    checklist["상담요약"] = checklist["상담요약"].fillna("").astype(str)
+    st.markdown("**학생별 면담 체크**")
+    st.caption("전체 학생을 대상으로 면담 여부를 체크합니다. 미완료 학생은 관리자 전체 현황에 자동 표시됩니다.")
+    return st.data_editor(
+        checklist[["면담완료", "이름", "구분", "출석률", "상담요약"]],
+        hide_index=True,
+        disabled=["이름", "구분", "출석률"],
+        column_config={
+            "면담완료": st.column_config.CheckboxColumn("면담 완료"),
+            "이름": st.column_config.TextColumn("이름", pinned=True),
+            "구분": st.column_config.TextColumn("학생 구분"),
+            "출석률": st.column_config.ProgressColumn("누적 출석률", format="percent", min_value=0, max_value=1),
+            "상담요약": st.column_config.TextColumn("상담 요약", width="large"),
+        },
+        num_rows="fixed",
+        key=key,
+        height=min(520, 38 + len(checklist) * 35),
+    )
+
+
+def counseling_rows_from_editor(
+    edited: pd.DataFrame, class_name: str, report_date: date, email: str
+) -> list[list]:
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return [
+        [
+            now, report_date.isoformat(), class_name, str(row["이름"]), str(row["구분"]),
+            "완료" if bool(row["면담완료"]) else "미완료", email, str(row["상담요약"]).strip(),
+        ]
+        for _, row in edited.iterrows()
+    ]
+
+
 def render_teacher_operation_view(df: pd.DataFrame, daily_df: pd.DataFrame) -> None:
     """Render a class-restricted operation and counseling journal for homeroom teachers."""
     email = str(st.session_state.get("current_user_email", "")).strip().lower()
@@ -730,6 +846,15 @@ def render_teacher_operation_view(df: pd.DataFrame, daily_df: pd.DataFrame) -> N
     if not available:
         st.error("현재 데이터에서 담당 반을 찾지 못했습니다.", icon=":material/school:")
         st.stop()
+
+    credentials = _report_service_account_credentials()
+    try:
+        counseling_history = (
+            load_counseling_status(REPORT_SHEET_ID, credentials)
+            if credentials is not None else load_local_counseling_status()
+        )
+    except Exception:
+        counseling_history = pd.DataFrame(columns=COUNSELING_HEADERS)
 
     latest_date = min(daily_df["날짜"].max().date(), date.today()) if not daily_df.empty else date.today()
     st.subheader("담당 반 운영·상담일지")
@@ -763,6 +888,9 @@ def render_teacher_operation_view(df: pd.DataFrame, daily_df: pd.DataFrame) -> N
             st.metric("지각·조퇴·외출", f"{events}명", border=True)
 
         render_student_attendance_groups(class_rows, "teacher_students")
+        counseling_checklist = render_counseling_checklist(
+            class_rows, counseling_history, "teacher_counseling_checklist"
+        )
 
         def teacher_star(label: str, key: str) -> int:
             st.markdown(f"**{label}** · 5점 만점")
@@ -806,11 +934,17 @@ def render_teacher_operation_view(df: pd.DataFrame, daily_df: pd.DataFrame) -> N
             "확인 필요" if min(score_values) <= 2 or absence > 0 else "정상",
         ]
         try:
-            credentials = _report_service_account_credentials()
             if credentials is not None:
                 save_operation_log(REPORT_SHEET_ID, credentials, values)
+                save_counseling_status(
+                    REPORT_SHEET_ID, credentials,
+                    counseling_rows_from_editor(counseling_checklist, operation_class, operation_date, email),
+                )
             else:
                 save_local_operation_log(values)
+                save_local_counseling_status(
+                    counseling_rows_from_editor(counseling_checklist, operation_class, operation_date, email)
+                )
             st.success("담당 반 운영·상담일지를 저장했습니다.", icon=":material/check_circle:")
         except Exception:
             st.error("일지를 저장하지 못했습니다. 잠시 후 다시 시도해 주세요.", icon=":material/cloud_off:")
@@ -1117,6 +1251,13 @@ with operation_view:
     except Exception as error:
         st.warning(f"운영일지 이력을 불러오지 못했습니다: {error}", icon=":material/cloud_off:")
         operation_history = pd.DataFrame(columns=OPERATION_HEADERS)
+    try:
+        counseling_history = (
+            load_counseling_status(REPORT_SHEET_ID, operation_credentials)
+            if operation_credentials is not None else load_local_counseling_status()
+        )
+    except Exception:
+        counseling_history = pd.DataFrame(columns=COUNSELING_HEADERS)
     operation_latest_date = (
         min(daily_df["날짜"].max().date(), date.today()) if not daily_df.empty else date.today()
     )
@@ -1134,8 +1275,8 @@ with operation_view:
     submitted_count = int(daily_class_summary["제출여부"].sum())
     attention_count = int((daily_class_summary["상태"] == "확인 필요").sum())
     with st.container(horizontal=True, horizontal_alignment="distribute"):
-        st.metric("제출 완료", f"{submitted_count}개 반", border=True)
-        st.metric("미제출", f"{max(len(daily_class_summary) - submitted_count, 0)}개 반", border=True)
+        st.metric("별점 반영", f"{submitted_count}개 반", border=True)
+        st.metric("별점 반영률", f"{submitted_count / max(len(daily_class_summary), 1):.0%}", border=True)
         st.metric("전체 출석률", f"{daily_class_summary['출석률'].mean():.1%}", border=True)
         st.metric(
             "운영 평균",
@@ -1152,7 +1293,7 @@ with operation_view:
                 with st.container(horizontal=True, horizontal_alignment="distribute"):
                     st.markdown(f"**{class_row['반']} · {class_row['과정']}**")
                     st.badge(
-                        class_row["상태"] if class_row["제출여부"] else "미제출",
+                        class_row["상태"] if class_row["제출여부"] else "평가 대기",
                         color="red" if class_row["상태"] == "확인 필요" else (
                             "green" if class_row["제출여부"] else "gray"
                         ),
@@ -1171,6 +1312,49 @@ with operation_view:
                     )
                 if class_row["특이사항"]:
                     st.caption(f":material/campaign: {str(class_row['특이사항'])[:70]}")
+
+    active_people = df[df["재적상태"] != "퇴소"][["반", "권역", "과정", "이름", "출석률"]].drop_duplicates(["반", "이름"])
+    latest_counseling = pd.DataFrame(columns=["반", "이름", "면담완료", "상담요약", "기준일"])
+    if not counseling_history.empty:
+        latest_counseling = counseling_history.copy()
+        latest_counseling["_작성일시"] = pd.to_datetime(latest_counseling["작성일시"], errors="coerce")
+        latest_counseling = (
+            latest_counseling.sort_values("_작성일시")
+            .drop_duplicates(["반", "이름"], keep="last")
+            [["반", "이름", "면담완료", "상담요약", "기준일"]]
+        )
+    all_counseling = active_people.merge(latest_counseling, on=["반", "이름"], how="left")
+    all_counseling["면담완료"] = all_counseling["면담완료"].fillna(False).astype(bool)
+    all_counseling["구분"] = all_counseling["출석률"].apply(
+        lambda value: "결석 집중관리" if float(value) < 0.8 else "일반학생"
+    )
+    incomplete_counseling = all_counseling[~all_counseling["면담완료"]].copy()
+    with st.container(border=True):
+        with st.container(horizontal=True, horizontal_alignment="distribute"):
+            st.metric("전체 재적학생", f"{len(all_counseling)}명", border=True)
+            st.metric("면담 완료", f"{int(all_counseling['면담완료'].sum())}명", border=True)
+            st.metric("면담 미완료", f"{len(incomplete_counseling)}명", border=True)
+            st.metric(
+                "집중관리 미면담",
+                f"{int((incomplete_counseling['구분'] == '결석 집중관리').sum())}명",
+                border=True,
+            )
+        with st.expander("전체 학생 면담 미완료 명단", icon=":material/checklist:"):
+            if incomplete_counseling.empty:
+                st.success("현재 모든 재적학생의 면담이 완료되었습니다.", icon=":material/check_circle:")
+            else:
+                st.dataframe(
+                    incomplete_counseling[["반", "권역", "과정", "이름", "구분", "출석률"]]
+                    .sort_values(["구분", "출석률", "반", "이름"]),
+                    hide_index=True,
+                    column_config={
+                        "반": st.column_config.TextColumn("반", pinned=True),
+                        "이름": st.column_config.TextColumn("이름", pinned=True),
+                        "출석률": st.column_config.ProgressColumn("누적 출석률", format="percent", min_value=0, max_value=1),
+                    },
+                    key="all_incomplete_counseling",
+                    height=430,
+                )
 
     if operation_can_write:
         with st.expander("최종관리자 리포트 출력", icon=":material/admin_panel_settings:"):
@@ -1261,6 +1445,9 @@ with operation_view:
                 )
 
             render_student_attendance_groups(class_info_rows, "admin_operation_students")
+            counseling_checklist = render_counseling_checklist(
+                class_info_rows, counseling_history, "admin_counseling_checklist"
+            )
 
             def star_score(label: str, key: str) -> int:
                 st.markdown(f"**{label}** · 5점 만점")
@@ -1343,8 +1530,19 @@ with operation_view:
             try:
                 if operation_credentials is not None:
                     save_operation_log(REPORT_SHEET_ID, operation_credentials, operation_values)
+                    save_counseling_status(
+                        REPORT_SHEET_ID, operation_credentials,
+                        counseling_rows_from_editor(
+                            counseling_checklist, operation_class, operation_date, operation_email
+                        ),
+                    )
                 else:
                     save_local_operation_log(operation_values)
+                    save_local_counseling_status(
+                        counseling_rows_from_editor(
+                            counseling_checklist, operation_class, operation_date, operation_email
+                        )
+                    )
                 st.success("일일 운영일지를 저장했습니다.", icon=":material/check_circle:")
                 st.rerun()
             except Exception as error:
@@ -1364,20 +1562,23 @@ with operation_view:
             latest_operation_date = operation_history["기준일"].dropna().max()
             latest_operation_logs = operation_history[
                 operation_history["기준일"] == latest_operation_date
-            ]
+            ].copy()
+            latest_operation_logs["_작성일시"] = pd.to_datetime(
+                latest_operation_logs["작성일시"], errors="coerce"
+            )
+            latest_operation_logs = (
+                latest_operation_logs.sort_values("_작성일시")
+                .drop_duplicates("반", keep="last")
+            )
             with st.container(horizontal=True, horizontal_alignment="distribute"):
-                st.metric("최근 제출", f"{len(latest_operation_logs)}개 반", border=True)
+                st.metric("별점 반영", f"{latest_operation_logs['반'].nunique()}개 반", border=True)
+                st.metric("평균 운영점수", f"{latest_operation_logs['평균점수'].mean():.1f} / 5점", border=True)
                 st.metric(
-                    "미제출",
-                    f"{max(len(operation_classes) - latest_operation_logs['반'].nunique(), 0)}개 반",
-                    border=True,
+                    "확인 필요", f"{(latest_operation_logs['상태'] == '확인 필요').sum()}개 반", border=True
                 )
-                st.metric("평균 점수", f"{latest_operation_logs['평균점수'].mean():.1f}점", border=True)
-                st.metric(
-                    "확인 필요", f"{(latest_operation_logs['상태'] == '확인 필요').sum()}건", border=True
-                )
+                st.metric("기준일", str(latest_operation_date), border=True)
             st.dataframe(
-                operation_history.sort_values("작성일시", ascending=False)[
+                latest_operation_logs.sort_values("작성일시", ascending=False)[
                     ["작성일시", "기준일", "반", "권역", "과정", "평균점수", "결석", "지각조퇴외출", "상태"]
                 ],
                 hide_index=True,
@@ -1391,7 +1592,7 @@ with operation_view:
                     "결석": st.column_config.NumberColumn("결석", format="%d명"),
                     "지각조퇴외출": st.column_config.NumberColumn("지각·조퇴·외출", format="%d명"),
                 },
-                height=min(430, 38 + len(operation_history) * 35),
+                height=min(430, 38 + len(latest_operation_logs) * 35),
                 key="operation_history_table",
             )
 
