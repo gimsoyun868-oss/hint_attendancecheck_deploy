@@ -307,3 +307,144 @@ def build_priority_pdf(priority, dropouts, report_history, as_of: str) -> bytes:
 
     doc.build(story, onFirstPage=_page_number, onLaterPages=_page_number)
     return output.getvalue()
+
+
+def _operations_chart(class_summary) -> Drawing:
+    frame = class_summary.copy()
+    labels = frame["반"].astype(str).tolist()
+    values = (frame["출석률"].fillna(0).clip(0, 1) * 100).round(1).tolist()
+    drawing = Drawing(735, 210)
+    drawing.add(String(8, 194, "17개 반 출석률", fontName=FONT_BOLD, fontSize=12, fillColor=NAVY))
+    chart = VerticalBarChart()
+    chart.x, chart.y, chart.width, chart.height = 45, 35, 665, 140
+    chart.data = [values]
+    chart.categoryAxis.categoryNames = labels
+    chart.categoryAxis.labels.fontName = FONT_REGULAR
+    chart.categoryAxis.labels.fontSize = 7
+    chart.categoryAxis.labels.angle = 25
+    chart.categoryAxis.labels.dy = -7
+    chart.valueAxis.valueMin = 0
+    chart.valueAxis.valueMax = 100
+    chart.valueAxis.valueStep = 20
+    chart.valueAxis.labels.fontName = FONT_REGULAR
+    chart.valueAxis.labels.fontSize = 7
+    chart.bars[0].fillColor = BLUE
+    chart.bars[0].strokeColor = BLUE
+    drawing.add(chart)
+    return drawing
+
+
+def build_operations_pdf(class_summary, operation_logs, title: str, period_label: str, admin_note: str = "") -> bytes:
+    """Build an administrator-only daily or weekly operations report."""
+    _register_fonts()
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name="OpsTitle", fontName=FONT_BOLD, fontSize=21, leading=26, textColor=NAVY))
+    styles.add(ParagraphStyle(name="OpsSubtitle", fontName=FONT_REGULAR, fontSize=9, leading=14, textColor=colors.HexColor("#667085")))
+    styles.add(ParagraphStyle(name="OpsSection", fontName=FONT_BOLD, fontSize=14, leading=18, textColor=NAVY, spaceAfter=7))
+    styles.add(ParagraphStyle(name="OpsHeader", fontName=FONT_BOLD, fontSize=7.5, leading=9, textColor=colors.white, alignment=TA_CENTER))
+    styles.add(ParagraphStyle(name="OpsCell", fontName=FONT_REGULAR, fontSize=7, leading=9, textColor=colors.HexColor("#344054")))
+    styles.add(ParagraphStyle(name="OpsBody", fontName=FONT_REGULAR, fontSize=9, leading=14, textColor=colors.HexColor("#344054")))
+
+    output = BytesIO()
+    doc = SimpleDocTemplate(
+        output,
+        pagesize=landscape(A4),
+        rightMargin=16 * mm,
+        leftMargin=16 * mm,
+        topMargin=14 * mm,
+        bottomMargin=17 * mm,
+        title=title,
+        author="HINT",
+    )
+
+    submitted = int(class_summary["제출여부"].sum()) if "제출여부" in class_summary else 0
+    average_rate = class_summary["출석률"].mean() if len(class_summary) else 0
+    absences = int(class_summary["결석"].sum()) if "결석" in class_summary else 0
+    attention = int((class_summary["상태"] == "확인 필요").sum()) if "상태" in class_summary else 0
+    kpis = Table(
+        [[
+            _paragraph("제출 완료", styles["OpsSubtitle"]), _paragraph(f"{submitted}개 반", styles["OpsSection"]),
+            _paragraph("평균 출석률", styles["OpsSubtitle"]), _paragraph(f"{average_rate:.1%}", styles["OpsSection"]),
+            _paragraph("결석", styles["OpsSubtitle"]), _paragraph(f"{absences}명", styles["OpsSection"]),
+            _paragraph("확인 필요", styles["OpsSubtitle"]), _paragraph(f"{attention}개 반", styles["OpsSection"]),
+        ]],
+        colWidths=[28 * mm, 34 * mm] * 4,
+        rowHeights=20 * mm,
+    )
+    kpis.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), LIGHT_GRAY),
+        ("BOX", (0, 0), (-1, -1), 0.7, GRID),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+    ]))
+
+    headers = ["반", "권역", "과정", "출석률", "결석", "지각·조퇴·외출", "운영점수", "제출", "상태", "특이사항"]
+    rows = [[_paragraph(value, styles["OpsHeader"]) for value in headers]]
+    for _, row in class_summary.iterrows():
+        rows.append([
+            row.get("반", "-"), row.get("권역", "-"), _paragraph(row.get("과정", "-"), styles["OpsCell"]),
+            f"{float(row.get('출석률', 0)):.1%}", f"{int(row.get('결석', 0))}명",
+            f"{int(row.get('지각조퇴외출', 0))}명",
+            f"{float(row.get('운영점수', 0)):.1f}" if row.get("제출여부", False) else "-",
+            "완료" if row.get("제출여부", False) else "미제출", row.get("상태", "-"),
+            _paragraph(row.get("특이사항", "-"), styles["OpsCell"]),
+        ])
+    summary_table = Table(
+        rows, repeatRows=1,
+        colWidths=[14 * mm, 20 * mm, 44 * mm, 19 * mm, 15 * mm, 27 * mm, 21 * mm, 18 * mm, 23 * mm, 59 * mm],
+    )
+    summary_commands = [
+        ("BACKGROUND", (0, 0), (-1, 0), NAVY), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 1), (-1, -1), FONT_REGULAR), ("FONTSIZE", (0, 1), (-1, -1), 7),
+        ("GRID", (0, 0), (-1, -1), 0.5, GRID), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (0, 1), (8, -1), "CENTER"), ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3), ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]
+    for row_index in range(1, len(rows)):
+        if row_index % 2 == 0:
+            summary_commands.append(("BACKGROUND", (0, row_index), (-1, row_index), LIGHT_GRAY))
+        if str(class_summary.iloc[row_index - 1].get("상태", "")) == "확인 필요":
+            summary_commands.append(("TEXTCOLOR", (8, row_index), (8, row_index), RED))
+    summary_table.setStyle(TableStyle(summary_commands))
+
+    story = [
+        Paragraph(title, styles["OpsTitle"]),
+        Paragraph(f"기간 {period_label} | 최종관리자용", styles["OpsSubtitle"]),
+        Spacer(1, 5 * mm), kpis, Spacer(1, 4 * mm), _operations_chart(class_summary),
+        PageBreak(), Paragraph("17개 반 통합 현황", styles["OpsSection"]), summary_table,
+    ]
+    if admin_note.strip():
+        note_table = Table(
+            [[_paragraph("관리자 총평", styles["OpsHeader"]), _paragraph(admin_note, styles["OpsBody"])]],
+            colWidths=[34 * mm, 220 * mm],
+        )
+        note_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (0, 0), NAVY), ("TEXTCOLOR", (0, 0), (0, 0), colors.white),
+            ("BACKGROUND", (1, 0), (1, 0), LIGHT_BLUE), ("GRID", (0, 0), (-1, -1), 0.5, GRID),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6), ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ]))
+        story.extend([Spacer(1, 5 * mm), KeepTogether(note_table)])
+
+    if operation_logs is not None and not operation_logs.empty:
+        issue_columns = ["기준일", "반", "작성자", "항목별특이사항", "출결특이사항", "면담결과", "기타특이사항"]
+        issue_rows = [[_paragraph(value, styles["OpsHeader"]) for value in issue_columns]]
+        for _, row in operation_logs.iterrows():
+            issue_rows.append([_paragraph(row.get(column, "-"), styles["OpsCell"]) for column in issue_columns])
+        issues_table = Table(
+            issue_rows, repeatRows=1,
+            colWidths=[24 * mm, 16 * mm, 36 * mm, 45 * mm, 45 * mm, 45 * mm, 45 * mm],
+        )
+        issues_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), NAVY), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("GRID", (0, 0), (-1, -1), 0.5, GRID), ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 3), ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+            ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.extend([PageBreak(), Paragraph("반별 특이사항 및 면담", styles["OpsSection"]), issues_table])
+
+    doc.build(story, onFirstPage=_page_number, onLaterPages=_page_number)
+    return output.getvalue()
+
