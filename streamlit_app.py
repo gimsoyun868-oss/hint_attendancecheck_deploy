@@ -938,7 +938,7 @@ with operation_view:
         st.metric("전체 출석률", f"{daily_class_summary['출석률'].mean():.1%}", border=True)
         st.metric(
             "운영 평균",
-            f"{daily_class_summary.loc[daily_class_summary['제출여부'], '운영점수'].mean():.1f}점"
+            f"{daily_class_summary.loc[daily_class_summary['제출여부'], '운영점수'].mean():.1f} / 5점"
             if submitted_count else "-",
             border=True,
         )
@@ -968,7 +968,7 @@ with operation_view:
                     st.metric("지각·조퇴·외출", f"{int(class_row['지각조퇴외출'])}명")
                     st.metric(
                         "운영점수",
-                        f"{float(class_row['운영점수']):.1f}점" if class_row["제출여부"] else "-",
+                        f"{float(class_row['운영점수']):.1f} / 5점" if class_row["제출여부"] else "-",
                     )
                 if class_row["특이사항"]:
                     st.caption(f":material/campaign: {str(class_row['특이사항'])[:70]}")
@@ -1061,32 +1061,37 @@ with operation_view:
                     f"출결 입력 {len(operation_day_rows)}명"
                 )
 
-            st.markdown("**교육 내용**")
+            def star_score(label: str, key: str) -> int:
+                st.markdown(f"**{label}** · 5점 만점")
+                selected = st.feedback("stars", key=key, default=4)
+                return (selected if selected is not None else 4) + 1
+
+            st.markdown("**교육 내용 · 항목별 5점 만점**")
             score_col1, score_col2, score_col3 = st.columns(3)
             with score_col1:
-                score_schedule = st.slider("과정 시간표", 1, 5, 5, key="score_schedule")
+                score_schedule = star_score("과정 시간표", "score_schedule")
             with score_col2:
-                score_content = st.slider("과정 내용", 1, 5, 5, key="score_content")
+                score_content = star_score("과정 내용", "score_content")
             with score_col3:
-                score_material = st.slider("교재 및 교구", 1, 5, 5, key="score_material")
+                score_material = star_score("교재 및 교구", "score_material")
 
-            st.markdown("**강사 역량**")
+            st.markdown("**강사 역량 · 항목별 5점 만점**")
             score_col4, score_col5 = st.columns(2)
             with score_col4:
-                score_delivery = st.slider("강의 전달력", 1, 5, 5, key="score_delivery")
+                score_delivery = star_score("강의 전달력", "score_delivery")
             with score_col5:
-                score_communication = st.slider("학습자 소통", 1, 5, 5, key="score_communication")
+                score_communication = star_score("학습자 소통", "score_communication")
 
-            st.markdown("**교육생 현황·교육 환경**")
+            st.markdown("**교육생 현황·교육 환경 · 항목별 5점 만점**")
             score_col6, score_col7, score_col8, score_col9 = st.columns(4)
             with score_col6:
-                score_participation = st.slider("수업 참여도", 1, 5, 5, key="score_participation")
+                score_participation = star_score("수업 참여도", "score_participation")
             with score_col7:
-                score_progress = st.slider("학습 진도", 1, 5, 5, key="score_progress")
+                score_progress = star_score("학습 진도", "score_progress")
             with score_col8:
-                score_facility = st.slider("교육장 시설", 1, 5, 5, key="score_facility")
+                score_facility = star_score("교육장 시설", "score_facility")
             with score_col9:
-                score_equipment = st.slider("교육 장비", 1, 5, 5, key="score_equipment")
+                score_equipment = star_score("교육 장비", "score_equipment")
 
             item_notes = st.text_area(
                 "평가 항목별 특이사항",
