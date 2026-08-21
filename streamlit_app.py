@@ -692,6 +692,36 @@ def require_access() -> None:
     st.stop()
 
 
+def render_student_attendance_groups(class_rows: pd.DataFrame, key_prefix: str) -> None:
+    """Split active students into high-absence and general groups for journal review."""
+    active = class_rows[class_rows["재적상태"] != "퇴소"].copy()
+    high_absence = active[active["출석률"] < 0.8].sort_values(["출석률", "이름"])
+    general = active[active["출석률"] >= 0.8].sort_values(["이름"])
+    dropouts = class_rows[class_rows["재적상태"] == "퇴소"]
+    with st.container(border=True):
+        with st.container(horizontal=True, horizontal_alignment="distribute"):
+            st.metric("결석 집중관리", f"{len(high_absence)}명", border=True)
+            st.metric("일반학생", f"{len(general)}명", border=True)
+            st.metric("퇴소자 제외", f"{len(dropouts)}명", border=True)
+        st.caption("결석 집중관리 기준: 누적 출석률 80% 미만 · 퇴소자는 두 그룹에서 제외")
+        focus_tab, general_tab = st.tabs([f"결석 집중관리 {len(high_absence)}명", f"일반학생 {len(general)}명"])
+        columns = ["이름", "출석률", "출석일수", "지각·조퇴·외출", "환산결석"]
+        config = {
+            "이름": st.column_config.TextColumn("이름", pinned=True),
+            "출석률": st.column_config.ProgressColumn("누적 출석률", format="percent", min_value=0, max_value=1),
+            "출석일수": st.column_config.NumberColumn("출석일수", format="%d일"),
+            "지각·조퇴·외출": st.column_config.NumberColumn("지각·조퇴·외출", format="%d회"),
+            "환산결석": st.column_config.NumberColumn("환산결석", format="%d회"),
+        }
+        with focus_tab:
+            if high_absence.empty:
+                st.caption("현재 결석 집중관리 학생이 없습니다.")
+            else:
+                st.dataframe(high_absence[columns], hide_index=True, column_config=config, key=f"{key_prefix}_focus")
+        with general_tab:
+            st.dataframe(general[columns], hide_index=True, column_config=config, key=f"{key_prefix}_general")
+
+
 def render_teacher_operation_view(df: pd.DataFrame, daily_df: pd.DataFrame) -> None:
     """Render a class-restricted operation and counseling journal for homeroom teachers."""
     email = str(st.session_state.get("current_user_email", "")).strip().lower()
@@ -732,6 +762,8 @@ def render_teacher_operation_view(df: pd.DataFrame, daily_df: pd.DataFrame) -> N
             st.metric("결석", f"{absence}명", border=True)
             st.metric("지각·조퇴·외출", f"{events}명", border=True)
 
+        render_student_attendance_groups(class_rows, "teacher_students")
+
         def teacher_star(label: str, key: str) -> int:
             st.markdown(f"**{label}** · 5점 만점")
             selected = st.feedback("stars", key=key, default=4)
@@ -751,7 +783,12 @@ def render_teacher_operation_view(df: pd.DataFrame, daily_df: pd.DataFrame) -> N
                     score_values.append(teacher_star(label, f"teacher_score_{key}"))
         item_notes = st.text_area("평가 항목별 특이사항", key="teacher_item_notes")
         attendance_notes = st.text_area("출결 및 운영 특이사항", key="teacher_attendance_notes")
-        interview_notes = st.text_area("교육생 상담·면담 결과", key="teacher_interview_notes")
+        focus_interview_notes = st.text_area(
+            "결석 집중관리 학생 상담·면담 결과", key="teacher_focus_interview_notes"
+        )
+        general_interview_notes = st.text_area(
+            "일반학생 상담·면담 결과", key="teacher_general_interview_notes"
+        )
         other_notes = st.text_area("기타 교육운영 특이사항", key="teacher_other_notes")
         submitted = st.form_submit_button("운영·상담일지 저장", type="primary", icon=":material/save:")
 
@@ -763,7 +800,9 @@ def render_teacher_operation_view(df: pd.DataFrame, daily_df: pd.DataFrame) -> N
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"), operation_date.isoformat(),
             operation_class, class_info.get("권역", ""), class_info.get("과정", ""), email,
             *score_values, attendance, approved, absence, events,
-            item_notes.strip(), attendance_notes.strip(), interview_notes.strip(), other_notes.strip(),
+            item_notes.strip(), attendance_notes.strip(),
+            f"[결석 집중관리]\n{focus_interview_notes.strip()}\n\n[일반학생]\n{general_interview_notes.strip()}",
+            other_notes.strip(),
             "확인 필요" if min(score_values) <= 2 or absence > 0 else "정상",
         ]
         try:
@@ -1221,6 +1260,8 @@ with operation_view:
                     f"출결 입력 {len(operation_day_rows)}명"
                 )
 
+            render_student_attendance_groups(class_info_rows, "admin_operation_students")
+
             def star_score(label: str, key: str) -> int:
                 st.markdown(f"**{label}** · 5점 만점")
                 selected = st.feedback("stars", key=key, default=4)
@@ -1263,10 +1304,15 @@ with operation_view:
                 placeholder="교통 지연, 신규 입과, 입력 지연 등 출결 수치의 배경을 작성해 주세요.",
                 key="operation_attendance_notes",
             )
-            interview_notes = st.text_area(
-                "교육생 면담 결과",
-                placeholder="일반 면담과 집중 관리 대상 면담 결과를 작성해 주세요.",
-                key="operation_interview_notes",
+            focus_interview_notes = st.text_area(
+                "결석 집중관리 학생 상담·면담 결과",
+                placeholder="누적 출석률 80% 미만 학생의 상담 결과를 작성해 주세요.",
+                key="operation_focus_interview_notes",
+            )
+            general_interview_notes = st.text_area(
+                "일반학생 상담·면담 결과",
+                placeholder="일반학생의 상담 및 관찰 내용을 작성해 주세요.",
+                key="operation_general_interview_notes",
             )
             other_notes = st.text_area(
                 "기타 교육운영 특이사항",
@@ -1290,7 +1336,8 @@ with operation_view:
                 score_delivery, score_communication, score_participation, score_progress,
                 score_facility, score_equipment, operation_attendance, operation_approved,
                 operation_absence, operation_events, item_notes.strip(), attendance_notes.strip(),
-                interview_notes.strip(), other_notes.strip(),
+                f"[결석 집중관리]\n{focus_interview_notes.strip()}\n\n[일반학생]\n{general_interview_notes.strip()}",
+                other_notes.strip(),
                 "확인 필요" if min(score_values) <= 2 or operation_absence > 0 else "정상",
             ]
             try:
