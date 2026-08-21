@@ -94,6 +94,43 @@ def load_allowed_emails(sheet_id: str, credentials: dict) -> set[str]:
     return allowed
 
 
+@st.cache_data(ttl="1m", max_entries=2, show_spinner=False)
+def load_access_profiles(sheet_id: str, credentials: dict) -> dict[str, dict]:
+    """Read email, active, role, and assigned classes from the access sheet."""
+    import gspread
+    from google.oauth2.credentials import Credentials
+
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets.readonly",
+        "https://www.googleapis.com/auth/drive.readonly",
+    ]
+    client = gspread.authorize(Credentials.from_authorized_user_info(credentials, scopes=scopes))
+    rows = client.open_by_key(sheet_id).sheet1.get_all_values()
+    profiles: dict[str, dict] = {}
+    disabled_values = {"n", "no", "false", "0", "중지", "비활성", "해제"}
+    for row in rows[1:]:
+        email = row[0].strip().lower() if row else ""
+        active = row[1].strip().lower() if len(row) > 1 else "y"
+        raw_role = row[2].strip().lower() if len(row) > 2 else ""
+        raw_classes = row[3].strip() if len(row) > 3 else ""
+        if not email or "@" not in email or active in disabled_values:
+            continue
+        if raw_role in {"관리자", "admin", "manager", "최종관리자"}:
+            role = "admin"
+        elif raw_role in {"담임", "teacher", "담임교사", "강사"}:
+            role = "teacher"
+        else:
+            role = "viewer"
+        assigned_classes = []
+        for value in re.split(r"[,;/\s]+", raw_classes):
+            value = value.strip()
+            if not value:
+                continue
+            assigned_classes.append(value if value.endswith("반") else f"{value}반")
+        profiles[email] = {"role": role, "classes": sorted(set(assigned_classes))}
+    return profiles
+
+
 def _report_service_account_credentials() -> dict | None:
     """Return the report writer credential stored only in Streamlit secrets."""
     try:
@@ -588,13 +625,15 @@ def require_access() -> None:
 
         email = str(st.user.get("email", "")).strip().lower()
         email_verified = bool(st.user.get("email_verified", False))
+        access_profiles: dict[str, dict] = {}
         if access_sheet_id:
             credentials = _authorized_user_credentials()
             if credentials is None:
                 st.error("접근 권한 목록 연결 정보를 찾지 못했습니다.", icon=":material/cloud_off:")
                 st.stop()
             try:
-                allowed_emails.update(load_allowed_emails(access_sheet_id, credentials))
+                access_profiles = load_access_profiles(access_sheet_id, credentials)
+                allowed_emails.update(access_profiles)
             except Exception:
                 st.error("접근 권한 목록을 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.", icon=":material/cloud_off:")
                 st.stop()
@@ -609,7 +648,20 @@ def require_access() -> None:
             st.caption(f"로그인: {email}")
             if st.button("로그아웃", icon=":material/logout:", width="stretch"):
                 st.logout()
+        profile = access_profiles.get(email, {})
+        role = "admin" if email in EDITOR_EMAILS else profile.get("role", "viewer")
+        if role not in {"admin", "teacher"}:
+            st.error("계정은 등록되어 있지만 관리자 또는 담임 역할이 지정되지 않았습니다.", icon=":material/manage_accounts:")
+            st.caption("접근권한 시트의 역할 열에 '관리자' 또는 '담임'을 입력해 주세요.")
+            st.stop()
+        assigned_classes = profile.get("classes", []) if role == "teacher" else []
+        if role == "teacher" and not assigned_classes:
+            st.error("담임 계정에 담당 반이 지정되지 않았습니다.", icon=":material/school:")
+            st.caption("접근권한 시트의 담당반 열에 예: 3반 또는 3반,4반을 입력해 주세요.")
+            st.stop()
         st.session_state["current_user_email"] = email
+        st.session_state["current_user_role"] = role
+        st.session_state["assigned_classes"] = assigned_classes
         return
 
     try:
@@ -618,6 +670,8 @@ def require_access() -> None:
         password = ""
     if not password:
         st.session_state["current_user_email"] = "local-admin"
+        st.session_state["current_user_role"] = "admin"
+        st.session_state["assigned_classes"] = []
         st.info(
             "로컬 미리보기 모드입니다. 공개 배포 환경에서는 Google 로그인이 필수입니다.",
             icon=":material/shield:",
@@ -625,6 +679,8 @@ def require_access() -> None:
         return
     if st.session_state.get("authenticated"):
         st.session_state["current_user_email"] = "local-admin"
+        st.session_state["current_user_role"] = "admin"
+        st.session_state["assigned_classes"] = []
         return
     st.title("K-뉴딜아카데미 출결 현황")
     entered = st.text_input("접근 비밀번호", type="password")
@@ -636,15 +692,114 @@ def require_access() -> None:
     st.stop()
 
 
+def render_teacher_operation_view(df: pd.DataFrame, daily_df: pd.DataFrame) -> None:
+    """Render a class-restricted operation and counseling journal for homeroom teachers."""
+    email = str(st.session_state.get("current_user_email", "")).strip().lower()
+    assigned = set(st.session_state.get("assigned_classes", []))
+    available = [value for value in df.sort_values("반번호")["반"].drop_duplicates() if value in assigned]
+    if not available:
+        st.error("현재 데이터에서 담당 반을 찾지 못했습니다.", icon=":material/school:")
+        st.stop()
+
+    latest_date = min(daily_df["날짜"].max().date(), date.today()) if not daily_df.empty else date.today()
+    st.subheader("담당 반 운영·상담일지")
+    st.caption("담당 반의 출결을 확인하고 특이사항과 교육생 면담 결과를 기록합니다.")
+    with st.form("teacher_operation_form", border=True):
+        left, middle, right = st.columns(3)
+        with left:
+            operation_date = st.date_input("날짜", value=latest_date, key="teacher_operation_date")
+        with middle:
+            operation_class = st.selectbox("담당 반", available, key="teacher_operation_class")
+        with right:
+            st.text_input("작성자", value=email, disabled=True)
+
+        if operation_class not in assigned:
+            st.error("담당 반이 아닌 일지는 저장할 수 없습니다.")
+            st.stop()
+        class_rows = df[df["반"] == operation_class]
+        class_info = class_rows.iloc[0] if not class_rows.empty else pd.Series(dtype=object)
+        day_rows = daily_df[
+            (daily_df["반"] == operation_class) & (daily_df["날짜"].dt.date == operation_date)
+        ].sort_values("날짜").drop_duplicates("이름", keep="last")
+        status = day_rows["상태"].value_counts()
+        attendance = int(status.get("출석", 0))
+        approved = int(status.get("인정출석", 0))
+        absence = int(status.get("결석", 0))
+        events = int(status.reindex(["지각", "조퇴", "외출"], fill_value=0).sum())
+        with st.container(horizontal=True, horizontal_alignment="distribute"):
+            st.metric("출석", f"{attendance}명", border=True)
+            st.metric("인정출석", f"{approved}명", border=True)
+            st.metric("결석", f"{absence}명", border=True)
+            st.metric("지각·조퇴·외출", f"{events}명", border=True)
+
+        def teacher_star(label: str, key: str) -> int:
+            st.markdown(f"**{label}** · 5점 만점")
+            selected = st.feedback("stars", key=key, default=4)
+            return (selected if selected is not None else 4) + 1
+
+        score_labels = [
+            ("과정 시간표", "schedule"), ("과정 내용", "content"),
+            ("교재 및 교구", "material"), ("강의 전달력", "delivery"),
+            ("학습자 소통", "communication"), ("수업 참여도", "participation"),
+            ("학습 진도", "progress"), ("교육장 시설", "facility"),
+            ("교육 장비", "equipment"),
+        ]
+        score_values = []
+        for row_start in range(0, len(score_labels), 3):
+            for column, (label, key) in zip(st.columns(3), score_labels[row_start:row_start + 3]):
+                with column:
+                    score_values.append(teacher_star(label, f"teacher_score_{key}"))
+        item_notes = st.text_area("평가 항목별 특이사항", key="teacher_item_notes")
+        attendance_notes = st.text_area("출결 및 운영 특이사항", key="teacher_attendance_notes")
+        interview_notes = st.text_area("교육생 상담·면담 결과", key="teacher_interview_notes")
+        other_notes = st.text_area("기타 교육운영 특이사항", key="teacher_other_notes")
+        submitted = st.form_submit_button("운영·상담일지 저장", type="primary", icon=":material/save:")
+
+    if submitted:
+        if operation_class not in assigned:
+            st.error("담당 반이 아닌 일지는 저장할 수 없습니다.")
+            return
+        values = [
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"), operation_date.isoformat(),
+            operation_class, class_info.get("권역", ""), class_info.get("과정", ""), email,
+            *score_values, attendance, approved, absence, events,
+            item_notes.strip(), attendance_notes.strip(), interview_notes.strip(), other_notes.strip(),
+            "확인 필요" if min(score_values) <= 2 or absence > 0 else "정상",
+        ]
+        try:
+            credentials = _report_service_account_credentials()
+            if credentials is not None:
+                save_operation_log(REPORT_SHEET_ID, credentials, values)
+            else:
+                save_local_operation_log(values)
+            st.success("담당 반 운영·상담일지를 저장했습니다.", icon=":material/check_circle:")
+        except Exception:
+            st.error("일지를 저장하지 못했습니다. 잠시 후 다시 시도해 주세요.", icon=":material/cloud_off:")
+
+
 require_access()
+
+current_role = str(st.session_state.get("current_user_role", "admin"))
+
+pastel_rules = "".join(
+    f".st-key-class_card_{index} {{background:{color}; border-radius:18px; padding:4px;}}"
+    for index, color in enumerate(
+        ["#FFF1F2", "#FFF7E6", "#F0FDF4", "#EFF6FF", "#F5F3FF", "#FFF1F8"] * 3
+    )
+)
+st.html(f"<style>{pastel_rules}</style>")
 
 with st.container(border=True):
     with st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
         with st.container(gap=None):
-            st.title("K-뉴딜아카데미 출결 현황")
-            st.caption("17개 반 500명의 출결과 이탈 위험 신호를 한 화면에서 확인합니다.")
+            st.title("K-뉴딜아카데미 출결 현황" if current_role == "admin" else "담당 반 운영·상담일지")
+            st.caption(
+                "17개 반 500명의 출결과 운영 현황을 한 화면에서 확인합니다."
+                if current_role == "admin"
+                else "담임 계정은 지정된 담당 반의 일지만 조회하고 작성할 수 있습니다."
+            )
         with st.container(horizontal=True, vertical_alignment="center"):
-            st.badge("500명 통합", color="blue", icon=":material/groups:")
+            st.badge("500명 통합" if current_role == "admin" else "담임 전용", color="blue", icon=":material/groups:")
             st.badge("개인정보 최소화", color="green", icon=":material/shield:")
 
 try:
@@ -654,6 +809,10 @@ except Exception as error:
     st.stop()
 if "이탈위험도" not in df.columns:
     df = add_early_warning(df)
+
+if current_role == "teacher":
+    render_teacher_operation_view(df, daily_df)
+    st.stop()
 
 with st.sidebar:
     st.header("필터")
@@ -947,12 +1106,10 @@ with operation_view:
         )
         st.metric("확인 필요", f"{attention_count}개 반", border=True)
 
-    st.markdown("**17개 반 한눈보기**")
-    st.caption("빨간 표시는 결석·이상 출결, 3점 미만 운영평가 또는 특이사항이 있는 반입니다.")
     class_card_columns = st.columns(4, gap="medium")
     for card_index, (_, class_row) in enumerate(daily_class_summary.iterrows()):
         with class_card_columns[card_index % 4]:
-            with st.container(border=True, height=220):
+            with st.container(border=True, height=220, key=f"class_card_{card_index}"):
                 with st.container(horizontal=True, horizontal_alignment="distribute"):
                     st.markdown(f"**{class_row['반']} · {class_row['과정']}**")
                     st.badge(
