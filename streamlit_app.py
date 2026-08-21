@@ -1,4 +1,3 @@
-# Streamlit Cloud redeploy: 2026-08-17
 from io import BytesIO
 from pathlib import Path
 from datetime import date, datetime
@@ -21,9 +20,18 @@ st.set_page_config(
 
 DATA_PATH = Path(__file__).parent / "data" / "participants.csv"
 DAILY_PATH = Path(__file__).parent / "data" / "daily_attendance.csv"
+if not DATA_PATH.exists():
+    DATA_PATH = Path(__file__).parent.parent / "dashboard_app" / "data" / "participants.csv"
+if not DAILY_PATH.exists():
+    DAILY_PATH = Path(__file__).parent.parent / "dashboard_app" / "data" / "daily_attendance.csv"
 GOOGLE_SHEET_ID = "1rVwWjo6EOdlRoqtrZ4v4d68vXbC2Pw7HQ3zaNpKIE34"
 REPORT_SHEET_ID = "13rFvlyikQrFbEQBssEurh2J9PBFqyw_5TzbQi0xMy7o"
-OAUTH_TOKEN_PATH = Path(__file__).parent / "google_oauth_token.json"
+OPERATION_SHEET_TITLE = "운영일지"
+OPERATION_LOCAL_PATH = Path(__file__).parent / "data" / "operation_logs.csv"
+OAUTH_TOKEN_PATHS = [
+    Path(__file__).parent / "google_oauth_token.json",
+    Path(__file__).parent.parent / "dashboard_app" / "google_oauth_token.json",
+]
 CACHE_SCHEMA_VERSION = "2026-08-12-risk-percent-v2"
 EDITOR_EMAILS = {
     "hint.soyun@gmail.com",
@@ -40,13 +48,22 @@ REPORT_HEADERS = [
     "조치 내용",
     "추후 확인사항",
 ]
+OPERATION_HEADERS = [
+    "작성일시", "기준일", "반", "권역", "과정", "작성자",
+    "교육일정", "과정내용", "교재교구", "강의전달력", "학습자소통",
+    "수업참여도", "학습진도", "교육장시설", "교육장비",
+    "출석", "인정출석", "결석", "지각조퇴외출",
+    "항목별특이사항", "출결특이사항", "면담결과", "기타특이사항", "상태",
+]
 
 
 def _authorized_user_credentials() -> dict | None:
     """Return the deployed Google credential without exposing it to callers."""
-    if OAUTH_TOKEN_PATH.exists():
+    for token_path in OAUTH_TOKEN_PATHS:
+        if not token_path.exists():
+            continue
         try:
-            return json.loads(OAUTH_TOKEN_PATH.read_text(encoding="utf-8"))
+            return json.loads(token_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             pass
     try:
@@ -111,6 +128,64 @@ def save_daily_report(sheet_id: str, credentials: dict, values: list[str]) -> No
         worksheet.freeze(rows=1)
     worksheet.append_row(values, value_input_option="USER_ENTERED")
     load_daily_reports.clear()
+
+
+@st.cache_data(ttl="1m", max_entries=2, show_spinner=False)
+def load_operation_logs(sheet_id: str, credentials: dict) -> pd.DataFrame:
+    import gspread
+
+    client = gspread.service_account_from_dict(credentials)
+    spreadsheet = client.open_by_key(sheet_id)
+    try:
+        worksheet = spreadsheet.worksheet(OPERATION_SHEET_TITLE)
+    except gspread.WorksheetNotFound:
+        return pd.DataFrame(columns=OPERATION_HEADERS)
+    values = worksheet.get_all_values()
+    if not values or values[0] != OPERATION_HEADERS:
+        return pd.DataFrame(columns=OPERATION_HEADERS)
+    rows = worksheet.get_all_records(expected_headers=OPERATION_HEADERS)
+    frame = pd.DataFrame(rows, columns=OPERATION_HEADERS)
+    if not frame.empty:
+        frame["기준일"] = pd.to_datetime(frame["기준일"], errors="coerce").dt.date
+    return frame
+
+
+def save_operation_log(sheet_id: str, credentials: dict, values: list) -> None:
+    import gspread
+
+    client = gspread.service_account_from_dict(credentials)
+    spreadsheet = client.open_by_key(sheet_id)
+    try:
+        worksheet = spreadsheet.worksheet(OPERATION_SHEET_TITLE)
+    except gspread.WorksheetNotFound:
+        worksheet = spreadsheet.add_worksheet(
+            title=OPERATION_SHEET_TITLE, rows=1000, cols=len(OPERATION_HEADERS)
+        )
+    if not worksheet.row_values(1):
+        worksheet.update(f"A1:X1", [OPERATION_HEADERS])
+        worksheet.freeze(rows=1)
+    worksheet.append_row(values, value_input_option="USER_ENTERED")
+    load_operation_logs.clear()
+
+
+def load_local_operation_logs() -> pd.DataFrame:
+    if not OPERATION_LOCAL_PATH.exists():
+        return pd.DataFrame(columns=OPERATION_HEADERS)
+    frame = pd.read_csv(OPERATION_LOCAL_PATH, encoding="utf-8-sig")
+    for column in OPERATION_HEADERS:
+        if column not in frame.columns:
+            frame[column] = ""
+    frame["기준일"] = pd.to_datetime(frame["기준일"], errors="coerce").dt.date
+    return frame[OPERATION_HEADERS]
+
+
+def save_local_operation_log(values: list) -> None:
+    OPERATION_LOCAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    current = load_local_operation_logs()
+    updated = pd.concat(
+        [current, pd.DataFrame([values], columns=OPERATION_HEADERS)], ignore_index=True
+    )
+    updated.to_csv(OPERATION_LOCAL_PATH, index=False, encoding="utf-8-sig")
 
 
 @st.cache_data(ttl="10m", max_entries=3, show_spinner="교육생 현황을 불러오는 중입니다...")
@@ -281,9 +356,11 @@ def load_google_sheet(
 
 
 def load_dashboard_data() -> tuple[pd.DataFrame, pd.DataFrame, str, pd.Timestamp]:
-    if OAUTH_TOKEN_PATH.exists():
+    for token_path in OAUTH_TOKEN_PATHS:
+        if not token_path.exists():
+            continue
         try:
-            credentials = json.loads(OAUTH_TOKEN_PATH.read_text(encoding="utf-8"))
+            credentials = json.loads(token_path.read_text(encoding="utf-8"))
             people, daily, synced_at = load_google_sheet(
                 GOOGLE_SHEET_ID, credentials, "authorized_user"
             )
@@ -310,6 +387,14 @@ def load_dashboard_data() -> tuple[pd.DataFrame, pd.DataFrame, str, pd.Timestamp
         pass
     except Exception as error:
         st.warning(f"구글 시트 동기화 실패로 저장된 데이터를 표시합니다: {error}", icon=":material/cloud_off:")
+
+    if st.session_state.get("current_user_email") == "local-admin" and DATA_PATH.exists() and DAILY_PATH.exists():
+        people = load_participants(str(DATA_PATH), DATA_PATH.stat().st_mtime, CACHE_SCHEMA_VERSION)
+        daily = load_daily_attendance(str(DAILY_PATH), DAILY_PATH.stat().st_mtime)
+        synced_at = pd.Timestamp.fromtimestamp(
+            max(DATA_PATH.stat().st_mtime, DAILY_PATH.stat().st_mtime), tz="Asia/Seoul"
+        )
+        return people, daily, "저장 데이터 · 로컬 미리보기", synced_at
 
     raise RuntimeError(
         "Google Sheets 연결 정보를 찾지 못했습니다. 개인정보 보호를 위해 저장된 교육생 자료는 표시하지 않습니다."
@@ -554,8 +639,8 @@ with st.container(horizontal=True, horizontal_alignment="distribute"):
     st.metric("고위험", f"{(filtered['위험등급'] == '고위험').sum():,}명", border=True)
     st.metric("주의·관찰", f"{filtered['위험등급'].isin(['주의', '관찰']).sum():,}명", border=True)
 
-overview, warning, manager_view, people, classes_view, period_view = st.tabs(
-    ["운영 요약", "이탈 조기경보", "우선관리·리포트", "전체 교육생", "반별 현황", "기간별 출결"],
+overview, operation_view, warning, manager_view, people, classes_view, period_view = st.tabs(
+    ["운영 요약", "일일 운영일지", "이탈 조기경보", "우선관리·리포트", "전체 교육생", "반별 현황", "기간별 출결"],
     default="운영 요약",
 )
 
@@ -756,6 +841,189 @@ with overview:
                     height=min(340, 38 + len(attention) * 35),
                     key="latest_attention_table",
                 )
+
+with operation_view:
+    st.subheader("일일 교육운영 모니터링")
+    st.caption("출결은 원본 구글 시트에서 자동 집계하고, 운영자는 평가·면담·특이사항만 기록합니다.")
+
+    operation_email = str(st.session_state.get("current_user_email", "local-admin")).strip().lower()
+    operation_can_write = operation_email == "local-admin" or operation_email in EDITOR_EMAILS
+    operation_credentials = _report_service_account_credentials()
+    operation_latest_date = (
+        min(daily_df["날짜"].max().date(), date.today()) if not daily_df.empty else date.today()
+    )
+    operation_classes = sorted(
+        df["반"].dropna().unique().tolist(),
+        key=lambda value: int(re.search(r"\d+", str(value)).group()) if re.search(r"\d+", str(value)) else 999,
+    )
+
+    if not operation_can_write:
+        st.info("운영일지는 지정된 작성자 계정만 저장할 수 있습니다.", icon=":material/lock:")
+    else:
+        with st.form("operation_monitoring_form", border=True):
+            st.markdown("**기본 정보**")
+            info_left, info_middle, info_right = st.columns(3)
+            with info_left:
+                operation_date = st.date_input("날짜", value=operation_latest_date, key="operation_date")
+            with info_middle:
+                operation_class = st.selectbox("반", operation_classes, key="operation_class")
+            with info_right:
+                st.text_input("작성자", value=operation_email, disabled=True)
+
+            class_info_rows = df[df["반"] == operation_class]
+            class_info = class_info_rows.iloc[0] if not class_info_rows.empty else pd.Series(dtype=object)
+            operation_day_rows = daily_df[
+                (daily_df["반"] == operation_class) & (daily_df["날짜"].dt.date == operation_date)
+            ].copy()
+            if not operation_day_rows.empty:
+                operation_day_rows = operation_day_rows.sort_values("날짜").drop_duplicates("이름", keep="last")
+            operation_status = operation_day_rows["상태"].value_counts()
+            operation_attendance = int(operation_status.get("출석", 0))
+            operation_approved = int(operation_status.get("인정출석", 0))
+            operation_absence = int(operation_status.get("결석", 0))
+            operation_events = int(operation_status.reindex(["지각", "조퇴", "외출"], fill_value=0).sum())
+
+            with st.container(border=True):
+                with st.container(horizontal=True, horizontal_alignment="distribute"):
+                    st.metric("출석", f"{operation_attendance}명", border=True)
+                    st.metric("인정출석", f"{operation_approved}명", border=True)
+                    st.metric("결석", f"{operation_absence}명", border=True)
+                    st.metric("지각·조퇴·외출", f"{operation_events}명", border=True)
+                st.caption(
+                    f"{class_info.get('권역', '-')} · {class_info.get('과정', '-')} · "
+                    f"출결 입력 {len(operation_day_rows)}명"
+                )
+
+            st.markdown("**교육 내용**")
+            score_col1, score_col2, score_col3 = st.columns(3)
+            with score_col1:
+                score_schedule = st.slider("과정 시간표", 1, 5, 5, key="score_schedule")
+            with score_col2:
+                score_content = st.slider("과정 내용", 1, 5, 5, key="score_content")
+            with score_col3:
+                score_material = st.slider("교재 및 교구", 1, 5, 5, key="score_material")
+
+            st.markdown("**강사 역량**")
+            score_col4, score_col5 = st.columns(2)
+            with score_col4:
+                score_delivery = st.slider("강의 전달력", 1, 5, 5, key="score_delivery")
+            with score_col5:
+                score_communication = st.slider("학습자 소통", 1, 5, 5, key="score_communication")
+
+            st.markdown("**교육생 현황·교육 환경**")
+            score_col6, score_col7, score_col8, score_col9 = st.columns(4)
+            with score_col6:
+                score_participation = st.slider("수업 참여도", 1, 5, 5, key="score_participation")
+            with score_col7:
+                score_progress = st.slider("학습 진도", 1, 5, 5, key="score_progress")
+            with score_col8:
+                score_facility = st.slider("교육장 시설", 1, 5, 5, key="score_facility")
+            with score_col9:
+                score_equipment = st.slider("교육 장비", 1, 5, 5, key="score_equipment")
+
+            item_notes = st.text_area(
+                "평가 항목별 특이사항",
+                placeholder="2점 이하 항목의 원인이나 확인이 필요한 내용을 작성해 주세요.",
+                key="operation_item_notes",
+            )
+            attendance_notes = st.text_area(
+                "출결 및 운영 특이사항",
+                placeholder="교통 지연, 신규 입과, 입력 지연 등 출결 수치의 배경을 작성해 주세요.",
+                key="operation_attendance_notes",
+            )
+            interview_notes = st.text_area(
+                "교육생 면담 결과",
+                placeholder="일반 면담과 집중 관리 대상 면담 결과를 작성해 주세요.",
+                key="operation_interview_notes",
+            )
+            other_notes = st.text_area(
+                "기타 교육운영 특이사항",
+                placeholder="시설, 일정, 강사 변경 등 추가 공유 내용을 작성해 주세요.",
+                key="operation_other_notes",
+            )
+            operation_submit = st.form_submit_button(
+                "운영일지 저장", type="primary", icon=":material/save:"
+            )
+
+        if operation_submit:
+            score_values = [
+                score_schedule, score_content, score_material, score_delivery,
+                score_communication, score_participation, score_progress,
+                score_facility, score_equipment,
+            ]
+            operation_values = [
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), operation_date.isoformat(),
+                operation_class, class_info.get("권역", ""), class_info.get("과정", ""),
+                operation_email, score_schedule, score_content, score_material,
+                score_delivery, score_communication, score_participation, score_progress,
+                score_facility, score_equipment, operation_attendance, operation_approved,
+                operation_absence, operation_events, item_notes.strip(), attendance_notes.strip(),
+                interview_notes.strip(), other_notes.strip(),
+                "확인 필요" if min(score_values) <= 2 or operation_absence > 0 else "정상",
+            ]
+            try:
+                if operation_credentials is not None:
+                    save_operation_log(REPORT_SHEET_ID, operation_credentials, operation_values)
+                else:
+                    save_local_operation_log(operation_values)
+                st.success("일일 운영일지를 저장했습니다.", icon=":material/check_circle:")
+            except Exception as error:
+                st.error(f"운영일지를 저장하지 못했습니다: {error}", icon=":material/cloud_off:")
+
+    try:
+        operation_history = (
+            load_operation_logs(REPORT_SHEET_ID, operation_credentials)
+            if operation_credentials is not None
+            else load_local_operation_logs()
+        )
+    except Exception as error:
+        st.warning(f"운영일지 이력을 불러오지 못했습니다: {error}", icon=":material/cloud_off:")
+        operation_history = pd.DataFrame(columns=OPERATION_HEADERS)
+
+    with st.container(border=True):
+        st.markdown("**운영일지 제출 현황**")
+        if operation_history.empty:
+            st.caption("아직 저장된 운영일지가 없습니다.")
+        else:
+            numeric_score_columns = OPERATION_HEADERS[6:15]
+            for score_column in numeric_score_columns:
+                operation_history[score_column] = pd.to_numeric(
+                    operation_history[score_column], errors="coerce"
+                )
+            operation_history["평균점수"] = operation_history[numeric_score_columns].mean(axis=1)
+            latest_operation_date = operation_history["기준일"].dropna().max()
+            latest_operation_logs = operation_history[
+                operation_history["기준일"] == latest_operation_date
+            ]
+            with st.container(horizontal=True, horizontal_alignment="distribute"):
+                st.metric("최근 제출", f"{len(latest_operation_logs)}개 반", border=True)
+                st.metric(
+                    "미제출",
+                    f"{max(len(operation_classes) - latest_operation_logs['반'].nunique(), 0)}개 반",
+                    border=True,
+                )
+                st.metric("평균 점수", f"{latest_operation_logs['평균점수'].mean():.1f}점", border=True)
+                st.metric(
+                    "확인 필요", f"{(latest_operation_logs['상태'] == '확인 필요').sum()}건", border=True
+                )
+            st.dataframe(
+                operation_history.sort_values("작성일시", ascending=False)[
+                    ["작성일시", "기준일", "반", "권역", "과정", "평균점수", "결석", "지각조퇴외출", "상태"]
+                ],
+                hide_index=True,
+                column_config={
+                    "작성일시": st.column_config.TextColumn("작성일시", pinned=True),
+                    "기준일": st.column_config.DateColumn("기준일"),
+                    "반": st.column_config.TextColumn("반", pinned=True),
+                    "평균점수": st.column_config.ProgressColumn(
+                        "평균 점수", min_value=0, max_value=5, format="%.1f점"
+                    ),
+                    "결석": st.column_config.NumberColumn("결석", format="%d명"),
+                    "지각조퇴외출": st.column_config.NumberColumn("지각·조퇴·외출", format="%d명"),
+                },
+                height=min(430, 38 + len(operation_history) * 35),
+                key="operation_history_table",
+            )
 
 with warning:
     st.caption(
@@ -1330,3 +1598,4 @@ with period_view:
                 height=420,
                 key="daily_attendance_detail",
             )
+
