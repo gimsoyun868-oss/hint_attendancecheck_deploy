@@ -423,8 +423,10 @@ def load_dashboard_data() -> tuple[pd.DataFrame, pd.DataFrame, str, pd.Timestamp
                 GOOGLE_SHEET_ID, credentials, "authorized_user"
             )
             return people, daily, "내 Google 계정 실시간", synced_at
-        except Exception as error:
-            st.warning(f"내 Google 계정 동기화 실패로 다른 연결을 확인합니다: {error}", icon=":material/account_circle_off:")
+        except Exception:
+            # 로컬 네트워크나 만료된 토큰 때문에 이 연결이 실패해도 다음 연결을
+            # 자동 확인한다. 최종 사용 화면에는 기술적인 OAuth 오류를 노출하지 않는다.
+            pass
 
     try:
         credentials = dict(st.secrets["google_authorized_user"])
@@ -434,8 +436,9 @@ def load_dashboard_data() -> tuple[pd.DataFrame, pd.DataFrame, str, pd.Timestamp
         return people, daily, "회사 Google 계정 실시간", synced_at
     except (KeyError, StreamlitSecretNotFoundError):
         pass
-    except Exception as error:
-        st.warning(f"배포용 Google 계정 동기화 실패로 다른 연결을 확인합니다: {error}", icon=":material/cloud_off:")
+    except Exception:
+        # 다음 연결 방식으로 조용히 전환한다.
+        pass
 
     try:
         credentials = dict(st.secrets["gcp_service_account"])
