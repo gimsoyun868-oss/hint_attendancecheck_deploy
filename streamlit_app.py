@@ -10,7 +10,7 @@ import pandas as pd
 import streamlit as st
 from streamlit.errors import StreamlitSecretNotFoundError
 
-from pdf_report import build_priority_pdf
+from pdf_report import build_operations_pdf, build_priority_pdf
 
 st.set_page_config(
     page_title="K-뉴딜아카데미 출결 현황",
@@ -186,6 +186,64 @@ def save_local_operation_log(values: list) -> None:
         [current, pd.DataFrame([values], columns=OPERATION_HEADERS)], ignore_index=True
     )
     updated.to_csv(OPERATION_LOCAL_PATH, index=False, encoding="utf-8-sig")
+
+
+def build_class_operations_summary(
+    participants: pd.DataFrame,
+    attendance: pd.DataFrame,
+    operation_logs: pd.DataFrame,
+    start_date: date,
+    end_date: date,
+) -> pd.DataFrame:
+    score_columns = OPERATION_HEADERS[6:15]
+    attendance_period = attendance[
+        attendance["날짜"].dt.date.between(start_date, end_date)
+    ].copy()
+    logs_period = operation_logs.copy()
+    if not logs_period.empty:
+        log_dates = pd.to_datetime(logs_period["기준일"], errors="coerce").dt.date
+        logs_period = logs_period[log_dates.between(start_date, end_date)].copy()
+        for column in score_columns:
+            logs_period[column] = pd.to_numeric(logs_period[column], errors="coerce")
+        logs_period["운영점수"] = logs_period[score_columns].mean(axis=1)
+
+    rows = []
+    class_info = participants[["반", "권역", "과정"]].drop_duplicates("반")
+    class_info["반번호"] = class_info["반"].str.extract(r"(\d+)").astype(int)
+    for _, info in class_info.sort_values("반번호").iterrows():
+        class_name = info["반"]
+        class_attendance = attendance_period[attendance_period["반"] == class_name]
+        status_counts = class_attendance["상태"].value_counts()
+        total_records = int(status_counts.sum())
+        present_count = int(status_counts.reindex(["출석", "인정출석"], fill_value=0).sum())
+        absence_count = int(status_counts.get("결석", 0))
+        event_count = int(status_counts.reindex(["지각", "조퇴", "외출"], fill_value=0).sum())
+        class_logs = logs_period[logs_period["반"] == class_name] if not logs_period.empty else logs_period
+        notes = []
+        if not class_logs.empty:
+            for column in ["항목별특이사항", "출결특이사항", "면담결과", "기타특이사항"]:
+                notes.extend(
+                    str(value).strip() for value in class_logs[column].tolist()
+                    if str(value).strip() and str(value).strip().lower() != "nan"
+                )
+        operation_score = float(class_logs["운영점수"].mean()) if not class_logs.empty else 0.0
+        submitted = not class_logs.empty
+        needs_attention = absence_count > 0 or event_count >= 3 or (
+            submitted and operation_score < 3
+        ) or bool(notes)
+        rows.append({
+            "반": class_name,
+            "권역": info["권역"],
+            "과정": info["과정"],
+            "출석률": present_count / total_records if total_records else 0.0,
+            "결석": absence_count,
+            "지각조퇴외출": event_count,
+            "운영점수": operation_score,
+            "제출여부": submitted,
+            "상태": "확인 필요" if needs_attention else "정상",
+            "특이사항": " / ".join(dict.fromkeys(notes)) if notes else "",
+        })
+    return pd.DataFrame(rows)
 
 
 @st.cache_data(ttl="10m", max_entries=3, show_spinner="교육생 현황을 불러오는 중입니다...")
@@ -849,6 +907,15 @@ with operation_view:
     operation_email = str(st.session_state.get("current_user_email", "local-admin")).strip().lower()
     operation_can_write = operation_email == "local-admin" or operation_email in EDITOR_EMAILS
     operation_credentials = _report_service_account_credentials()
+    try:
+        operation_history = (
+            load_operation_logs(REPORT_SHEET_ID, operation_credentials)
+            if operation_credentials is not None
+            else load_local_operation_logs()
+        )
+    except Exception as error:
+        st.warning(f"운영일지 이력을 불러오지 못했습니다: {error}", icon=":material/cloud_off:")
+        operation_history = pd.DataFrame(columns=OPERATION_HEADERS)
     operation_latest_date = (
         min(daily_df["날짜"].max().date(), date.today()) if not daily_df.empty else date.today()
     )
@@ -856,6 +923,106 @@ with operation_view:
         df["반"].dropna().unique().tolist(),
         key=lambda value: int(re.search(r"\d+", str(value)).group()) if re.search(r"\d+", str(value)) else 999,
     )
+
+    monitoring_date = st.date_input(
+        "17개 반 현황 기준일", value=operation_latest_date, key="monitoring_date"
+    )
+    daily_class_summary = build_class_operations_summary(
+        df, daily_df, operation_history, monitoring_date, monitoring_date
+    )
+    submitted_count = int(daily_class_summary["제출여부"].sum())
+    attention_count = int((daily_class_summary["상태"] == "확인 필요").sum())
+    with st.container(horizontal=True, horizontal_alignment="distribute"):
+        st.metric("제출 완료", f"{submitted_count}개 반", border=True)
+        st.metric("미제출", f"{max(len(daily_class_summary) - submitted_count, 0)}개 반", border=True)
+        st.metric("전체 출석률", f"{daily_class_summary['출석률'].mean():.1%}", border=True)
+        st.metric(
+            "운영 평균",
+            f"{daily_class_summary.loc[daily_class_summary['제출여부'], '운영점수'].mean():.1f}점"
+            if submitted_count else "-",
+            border=True,
+        )
+        st.metric("확인 필요", f"{attention_count}개 반", border=True)
+
+    st.markdown("**17개 반 한눈보기**")
+    st.caption("빨간 표시는 결석·이상 출결, 3점 미만 운영평가 또는 특이사항이 있는 반입니다.")
+    class_card_columns = st.columns(4, gap="medium")
+    for card_index, (_, class_row) in enumerate(daily_class_summary.iterrows()):
+        with class_card_columns[card_index % 4]:
+            with st.container(border=True, height=220):
+                with st.container(horizontal=True, horizontal_alignment="distribute"):
+                    st.markdown(f"**{class_row['반']} · {class_row['과정']}**")
+                    st.badge(
+                        class_row["상태"] if class_row["제출여부"] else "미제출",
+                        color="red" if class_row["상태"] == "확인 필요" else (
+                            "green" if class_row["제출여부"] else "gray"
+                        ),
+                    )
+                st.caption(str(class_row["권역"]))
+                st.progress(
+                    min(float(class_row["출석률"]), 1.0),
+                    text=f"출석률 {float(class_row['출석률']):.1%}",
+                )
+                with st.container(horizontal=True, horizontal_alignment="distribute"):
+                    st.metric("결석", f"{int(class_row['결석'])}명")
+                    st.metric("지각·조퇴·외출", f"{int(class_row['지각조퇴외출'])}명")
+                    st.metric(
+                        "운영점수",
+                        f"{float(class_row['운영점수']):.1f}점" if class_row["제출여부"] else "-",
+                    )
+                if class_row["특이사항"]:
+                    st.caption(f":material/campaign: {str(class_row['특이사항'])[:70]}")
+
+    if operation_can_write:
+        with st.expander("최종관리자 리포트 출력", icon=":material/admin_panel_settings:"):
+            admin_report_note = st.text_area(
+                "관리자 총평",
+                placeholder="전체 17개 반의 주요 이슈, 원인, 협업사 공유사항과 후속 확인 내용을 작성해 주세요.",
+                key="admin_operations_note",
+            )
+            weekly_start = monitoring_date - pd.Timedelta(days=6)
+            weekly_summary = build_class_operations_summary(
+                df, daily_df, operation_history, weekly_start, monitoring_date
+            )
+            operation_log_dates = pd.to_datetime(
+                operation_history["기준일"], errors="coerce"
+            ).dt.date if not operation_history.empty else pd.Series(dtype=object)
+            daily_logs_for_pdf = operation_history[
+                operation_log_dates == monitoring_date
+            ] if not operation_history.empty else operation_history
+            weekly_logs_for_pdf = operation_history[
+                operation_log_dates.between(weekly_start, monitoring_date)
+            ] if not operation_history.empty else operation_history
+            pdf_left, pdf_right = st.columns(2)
+            with pdf_left:
+                st.download_button(
+                    "데일리 PDF 다운로드",
+                    data=build_operations_pdf(
+                        daily_class_summary, daily_logs_for_pdf,
+                        "K-뉴딜아카데미 데일리 운영 리포트",
+                        monitoring_date.isoformat(), admin_report_note,
+                    ),
+                    file_name=f"K뉴딜_데일리_운영리포트_{monitoring_date.strftime('%Y%m%d')}.pdf",
+                    mime="application/pdf",
+                    icon=":material/picture_as_pdf:",
+                    type="primary",
+                )
+            with pdf_right:
+                st.download_button(
+                    "위클리 PDF 다운로드",
+                    data=build_operations_pdf(
+                        weekly_summary, weekly_logs_for_pdf,
+                        "K-뉴딜아카데미 위클리 운영 리포트",
+                        f"{weekly_start.isoformat()} ~ {monitoring_date.isoformat()}", admin_report_note,
+                    ),
+                    file_name=(
+                        f"K뉴딜_위클리_운영리포트_{weekly_start.strftime('%Y%m%d')}_"
+                        f"{monitoring_date.strftime('%Y%m%d')}.pdf"
+                    ),
+                    mime="application/pdf",
+                    icon=":material/picture_as_pdf:",
+                    type="primary",
+                )
 
     if not operation_can_write:
         st.info("운영일지는 지정된 작성자 계정만 저장할 수 있습니다.", icon=":material/lock:")
@@ -967,18 +1134,9 @@ with operation_view:
                 else:
                     save_local_operation_log(operation_values)
                 st.success("일일 운영일지를 저장했습니다.", icon=":material/check_circle:")
+                st.rerun()
             except Exception as error:
                 st.error(f"운영일지를 저장하지 못했습니다: {error}", icon=":material/cloud_off:")
-
-    try:
-        operation_history = (
-            load_operation_logs(REPORT_SHEET_ID, operation_credentials)
-            if operation_credentials is not None
-            else load_local_operation_logs()
-        )
-    except Exception as error:
-        st.warning(f"운영일지 이력을 불러오지 못했습니다: {error}", icon=":material/cloud_off:")
-        operation_history = pd.DataFrame(columns=OPERATION_HEADERS)
 
     with st.container(border=True):
         st.markdown("**운영일지 제출 현황**")
