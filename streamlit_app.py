@@ -57,7 +57,9 @@ OPERATION_HEADERS = [
     "출석", "인정출석", "결석", "지각조퇴외출",
     "항목별특이사항", "출결특이사항", "면담결과", "기타특이사항", "상태",
 ]
-COUNSELING_HEADERS = ["작성일시", "기준일", "반", "이름", "구분", "면담완료", "작성자", "상담요약"]
+COUNSELING_HEADERS = [
+    "작성일시", "기준일", "반", "이름", "구분", "면담완료", "작성자", "상담요약", "권역", "과정"
+]
 
 
 def _authorized_user_credentials() -> dict | None:
@@ -239,9 +241,15 @@ def load_counseling_status(sheet_id: str, credentials: dict) -> pd.DataFrame:
     except gspread.WorksheetNotFound:
         return pd.DataFrame(columns=COUNSELING_HEADERS)
     values = worksheet.get_all_values()
-    if not values or values[0] != COUNSELING_HEADERS:
+    if not values:
         return pd.DataFrame(columns=COUNSELING_HEADERS)
-    frame = pd.DataFrame(worksheet.get_all_records(expected_headers=COUNSELING_HEADERS), columns=COUNSELING_HEADERS)
+    source_headers = values[0]
+    records = [dict(zip(source_headers, row)) for row in values[1:] if any(str(value).strip() for value in row)]
+    frame = pd.DataFrame(records)
+    for column in COUNSELING_HEADERS:
+        if column not in frame.columns:
+            frame[column] = ""
+    frame = frame[COUNSELING_HEADERS]
     if not frame.empty:
         frame["면담완료"] = frame["면담완료"].astype(str).str.lower().isin(["true", "y", "yes", "1", "완료"])
     return frame
@@ -256,8 +264,8 @@ def save_counseling_status(sheet_id: str, credentials: dict, rows: list[list]) -
         worksheet = spreadsheet.worksheet(COUNSELING_SHEET_TITLE)
     except gspread.WorksheetNotFound:
         worksheet = spreadsheet.add_worksheet(title=COUNSELING_SHEET_TITLE, rows=5000, cols=len(COUNSELING_HEADERS))
-    if not worksheet.row_values(1):
-        worksheet.update("A1:H1", [COUNSELING_HEADERS])
+    if worksheet.row_values(1) != COUNSELING_HEADERS:
+        worksheet.update("A1:J1", [COUNSELING_HEADERS])
         worksheet.freeze(rows=1)
     if rows:
         worksheet.append_rows(rows, value_input_option="USER_ENTERED")
@@ -826,13 +834,15 @@ def render_counseling_checklist(
 
 
 def counseling_rows_from_editor(
-    edited: pd.DataFrame, class_name: str, report_date: date, email: str
+    edited: pd.DataFrame, class_name: str, report_date: date, email: str,
+    region: str, course: str,
 ) -> list[list]:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return [
         [
             now, report_date.isoformat(), class_name, str(row["이름"]), str(row["구분"]),
             "완료" if bool(row["면담완료"]) else "미완료", email, str(row["상담요약"]).strip(),
+            region, course,
         ]
         for _, row in edited.iterrows()
     ]
@@ -938,12 +948,18 @@ def render_teacher_operation_view(df: pd.DataFrame, daily_df: pd.DataFrame) -> N
                 save_operation_log(REPORT_SHEET_ID, credentials, values)
                 save_counseling_status(
                     REPORT_SHEET_ID, credentials,
-                    counseling_rows_from_editor(counseling_checklist, operation_class, operation_date, email),
+                    counseling_rows_from_editor(
+                        counseling_checklist, operation_class, operation_date, email,
+                        str(class_info.get("권역", "")), str(class_info.get("과정", "")),
+                    ),
                 )
             else:
                 save_local_operation_log(values)
                 save_local_counseling_status(
-                    counseling_rows_from_editor(counseling_checklist, operation_class, operation_date, email)
+                    counseling_rows_from_editor(
+                        counseling_checklist, operation_class, operation_date, email,
+                        str(class_info.get("권역", "")), str(class_info.get("과정", "")),
+                    )
                 )
             st.success("담당 반 운영·상담일지를 저장했습니다.", icon=":material/check_circle:")
         except Exception:
@@ -1355,6 +1371,40 @@ with operation_view:
                     key="all_incomplete_counseling",
                     height=430,
                 )
+        with st.expander("학생별 상담 저장 현황", icon=":material/person_check:"):
+            if counseling_history.empty:
+                st.caption("아직 저장된 학생별 상담 기록이 없습니다.")
+            else:
+                saved_counseling = counseling_history.copy()
+                saved_counseling["_작성일시"] = pd.to_datetime(
+                    saved_counseling["작성일시"], errors="coerce"
+                )
+                saved_counseling = (
+                    saved_counseling.sort_values("_작성일시")
+                    .drop_duplicates(["반", "이름"], keep="last")
+                )
+                class_metadata = df[["반", "권역", "과정"]].drop_duplicates("반")
+                saved_counseling = saved_counseling.merge(
+                    class_metadata, on="반", how="left", suffixes=("", "_현재")
+                )
+                for field in ["권역", "과정"]:
+                    saved_counseling[field] = saved_counseling[field].replace("", pd.NA).fillna(
+                        saved_counseling[f"{field}_현재"]
+                    )
+                st.dataframe(
+                    saved_counseling[
+                        ["기준일", "반", "권역", "과정", "이름", "구분", "면담완료", "작성자", "상담요약"]
+                    ].sort_values(["반", "이름"]),
+                    hide_index=True,
+                    column_config={
+                        "기준일": st.column_config.DateColumn("기준일"),
+                        "반": st.column_config.TextColumn("반", pinned=True),
+                        "이름": st.column_config.TextColumn("학생 이름", pinned=True),
+                        "면담완료": st.column_config.CheckboxColumn("면담 완료"),
+                    },
+                    key="saved_counseling_status",
+                    height=430,
+                )
 
     if operation_can_write:
         with st.expander("최종관리자 리포트 출력", icon=":material/admin_panel_settings:"):
@@ -1533,14 +1583,16 @@ with operation_view:
                     save_counseling_status(
                         REPORT_SHEET_ID, operation_credentials,
                         counseling_rows_from_editor(
-                            counseling_checklist, operation_class, operation_date, operation_email
+                            counseling_checklist, operation_class, operation_date, operation_email,
+                            str(class_info.get("권역", "")), str(class_info.get("과정", "")),
                         ),
                     )
                 else:
                     save_local_operation_log(operation_values)
                     save_local_counseling_status(
                         counseling_rows_from_editor(
-                            counseling_checklist, operation_class, operation_date, operation_email
+                            counseling_checklist, operation_class, operation_date, operation_email,
+                            str(class_info.get("권역", "")), str(class_info.get("과정", "")),
                         )
                     )
                 st.success("일일 운영일지를 저장했습니다.", icon=":material/check_circle:")
